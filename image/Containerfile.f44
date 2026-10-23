@@ -14,16 +14,20 @@
 # Keep every instruction below the LABEL block identical to image/Containerfile.
 #
 # Base image: quay.io/fedora/fedora-bootc tag 44, pinned by the digest of its
-# multi-architecture OCI image index, resolved on 2026-10-16 at about 16:16 UTC
-# through https://quay.io/api/v1/repository/fedora/fedora-bootc/tag/?specificTag=44
-#   index (pinned below)  sha256:9db34195bc0b6be43e17c20ca840be5bc153093c94b62f6792a76fb199eeaced
-#   linux/amd64 child     sha256:f2d97f1e70d557d05900d6eba9c37a29ccff9aeaf0785ba661047492cd0136bc
-#   linux/arm64 child     sha256:3588110b39357b21348ab8c6e8ce7aa50c813b92a930118e06d89ca389cc0287
+# multi-architecture OCI image index. RE-PINNED 2026-10-23 (decision PD-14):
+# the digest resolved on 2026-10-16,
+# sha256:9db34195bc0b6be43e17c20ca840be5bc153093c94b62f6792a76fb199eeaced, is
+# no longer retrievable from the registry (see image/Containerfile for the full
+# note). Resolved on 2026-10-23 at about 15:20 UTC through the Docker Registry
+# v2 API (GET /v2/fedora/fedora-bootc/manifests/44, Accept: image index):
+#   index (pinned below)  sha256:03808453feb5369ed6b074421117b56734f3a6dff8e25d9e0ddff0e48e4d6d2e
+#   linux/amd64 child     sha256:6696735d43fd04a9e963cfd9f7e1458c6dc0cb978e166fabbe379117ad12451d
+#   linux/arm64 child     sha256:f63e5f727a9ce1818440a3c928ef75a52b0c63eb6e528284f4759eb34a4658ee
 #   (ppc64le and s390x children also exist; Tidemark does not build them)
-#   image version 44.20261016.0; amd64 kernel 7.2.10-200.fc44.x86_64 (ostree.linux label)
+#   image version 44.20261023.0; amd64 kernel 7.2.11-200.fc44.x86_64 (ostree.linux label)
 # The tag is rebuilt daily, so the digest is the identity. Renovate proposes
 # digest refreshes and is configured to keep this file on tag 44.
-FROM quay.io/fedora/fedora-bootc:44@sha256:9db34195bc0b6be43e17c20ca840be5bc153093c94b62f6792a76fb199eeaced
+FROM quay.io/fedora/fedora-bootc:44@sha256:03808453feb5369ed6b074421117b56734f3a6dff8e25d9e0ddff0e48e4d6d2e
 
 LABEL org.opencontainers.image.title="AgentOS Tidemark (Phase 0 draft, Fedora 44 fallback)" \
       org.opencontainers.image.description="Phase 0 pipeline-test image: boot self-test only, no Tidemark enforcement." \

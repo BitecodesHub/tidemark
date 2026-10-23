@@ -36,7 +36,9 @@ SUBCGS=()
 cleanup_common() {
 	local m c h
 	for m in "${MOUNTS[@]:-}"; do
-		[ -n "${m}" ] && umount "${m}" >/dev/null 2>&1 || true
+		if [ -n "${m}" ]; then
+			umount "${m}" >/dev/null 2>&1 || true
+		fi
 	done
 	# Child cgroups created by a scenario must be emptied and removed, or the
 	# scope's own cgroup cannot be removed when systemd stops it.
@@ -48,7 +50,9 @@ cleanup_common() {
 	done
 	systemctl stop "${UNIT}" "${OTHER_UNIT}" >/dev/null 2>&1 || true
 	for h in "${HOLDERS[@]:-}"; do
-		[ -n "${h}" ] && kill "${h}" >/dev/null 2>&1 || true
+		if [ -n "${h}" ]; then
+			kill "${h}" >/dev/null 2>&1 || true
+		fi
 	done
 	rm -rf "${SCRATCH}" >/dev/null 2>&1 || true
 }

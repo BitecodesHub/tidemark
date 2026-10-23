@@ -1,11 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # AgentOS Tidemark - Phase 0 kernel spike on x86_64 (KVM).
-# STATUS: Phase 0 draft, not yet run. It boots a stock Fedora 45 Cloud x86_64
-# image under QEMU/KVM on a free GitHub runner, installs the build dependencies
-# through cloud-init, builds the BPF object and the Go probe, runs every scenario
-# script, and gates on the "SUMMARY: ALL PASS" line printed to the serial
-# console. The serial log is always uploaded.
+# STATUS: Phase 0. It boots a stock Fedora 45 Cloud x86_64 image under QEMU/KVM
+# on a free GitHub runner, installs the build dependencies, builds the BPF
+# object and the Go probe, runs every scenario script, and gates on the
+# "SUMMARY: ALL PASS" line plus a zero exit status.
+#
+# HOW THE GUEST IS DRIVEN (learned the hard way, run 39965539646 on 2026-10-23):
+# the first version of this job ran everything inside a cloud-init runcmd and
+# read the result off the serial log. It failed even though the guest powered
+# off cleanly with qemu exit 0. The reason is the serial console itself:
+# serial-getty@ttyS0 restarted while dnf was still running, its vhangup()
+# replaced the runcmd shell's stdout/stderr file operations with the hung-up
+# tty, and every later write returned -EIO and was dropped. The build, the
+# suite and the result marker simply never reached the log, so there was no
+# evidence either way. This job therefore runs the build and the suite over
+# SSH (QEMU user-mode networking with a host forward) and keeps the serial log
+# only as boot and kernel-oops evidence.
+#
+# The source tree reaches the guest on a labelled ISO built from `git archive`,
+# never from the working directory: the local spike tree holds aarch64 build
+# products (label_probe.bpf.o, tidemark-probe, bpf/vmlinux.h, the Go module
+# cache) whose mtimes are newer than the sources, which would make the guest's
+# `make` reuse an arm64 object and binary on an x86_64 kernel.
 #
 # Actions are pinned by commit SHA (resolved 2026-10-16):
 #   actions/checkout        v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -16,8 +33,9 @@
 # KERNEL UNDER TEST: this job deliberately tests the kernel shipped in the
 # pinned Beta compose (7.2.0-61.fc45), not the newest 7.2.x update, so that
 # results are reproducible. The Makefile pins Go caches inside the spike tree,
-# and the runcmd exports HOME because cloud-init's final stage runs without it.
-# Re-pin task: switch to the GA image within one week of the Fedora 45 release.
+# and the SSH commands set HOME because a non-login sudo session may not carry
+# one. Re-pin task: switch to the GA image within one week of the Fedora 45
+# release.
 
 name: kernel-spike
 
@@ -42,11 +60,13 @@ concurrency:
 jobs:
   spike:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       IMAGE_URL: "https://dl.fedoraproject.org/pub/fedora/linux/releases/test/45_Beta/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-45_Beta-1.3.x86_64.qcow2"
       IMAGE_SHA256: "06bd4382a3bc5e5f94cd520f9ee15bdfb38d7bb72552b27fe06d581ba9a84292"
-      QEMU_TIMEOUT: "1800"
+      GUEST_SSH_PORT: "2222"
+      SSH_WAIT_SECONDS: "300"
+
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,9 +101,28 @@ jobs:
       - name: Build the spike source ISO
         run: |
           set -euo pipefail
-          # The spike tree is delivered to the VM on a labelled ISO (second
-          # disk), mounted and copied to /opt/spike by cloud-init.
-          xorriso -as mkisofs -V TMSPIKE -J -r -o src.iso spike
+          # Exactly the tracked tree at HEAD, with no build products and no
+          # preserved-build-artifact mtimes (see the header comment).
+          rm -rf staging src.iso
+          mkdir -p staging
+          git archive --format=tar HEAD spike | tar -x -C staging --strip-components=1
+          test -f staging/Makefile
+          test -f staging/bpf/label_probe.bpf.c
+          test ! -e staging/label_probe.bpf.o
+          test ! -e staging/tidemark-probe
+          test ! -e staging/bpf/vmlinux.h
+          # -r: Rock Ridge, so modes and long names survive; -J is ignored by
+          # the guest but keeps the image readable from Windows tooling.
+          xorriso -as mkisofs -V TMSPIKE -r -o src.iso staging
+          ls -l src.iso
+
+      - name: Create the SSH key pair for the guest
+        run: |
+          set -euo pipefail
+          # Ephemeral: generated per run, never committed, never uploaded.
+          ssh-keygen -t ed25519 -f "${RUNNER_TEMP}/spike_key" -N '' -C tidemark-ci
+          chmod 0600 "${RUNNER_TEMP}/spike_key"
+          test -f "${RUNNER_TEMP}/spike_key.pub"
 
       - name: Build the cloud-init seed
         run: |
@@ -92,54 +131,167 @@ jobs:
           instance-id: tidemark-spike
           local-hostname: tidemark-spike
           EOF
-          cat > user-data <<'EOF'
+          {
+            cat <<'EOF'
           #cloud-config
-          runcmd:
-            - [ bash, -c, "exec > /dev/ttyS0 2>&1; set -x; mkdir -p /opt/spike; mount -o ro /dev/disk/by-label/TMSPIKE /mnt; cp -a /mnt/. /opt/spike/; umount /mnt; export HOME=/root; bash /opt/spike/provision/fedora-deps.sh; make -C /opt/spike test SUDO=; echo TIDEMARK-SPIKE-RC=$?; sync; poweroff -f" ]
+          ssh_pwauth: false
+          users:
+            - name: spikeci
+              shell: /bin/bash
+              groups: [sudo]
+              sudo: ["ALL=(ALL) NOPASSWD: ALL"]
+              ssh_authorized_keys:
           EOF
+            sed 's/^/          - /' "${RUNNER_TEMP}/spike_key.pub"
+            cat <<'EOF'
+          runcmd:
+            - [ bash, -c, "set -x; mkdir -p /opt/spike; mount -o ro /dev/disk/by-label/TMSPIKE /mnt; cp -a /mnt/. /opt/spike/; umount /mnt; chmod 0755 /opt/spike; touch /opt/spike/.staged" ]
+          EOF
+          } > user-data
+          # The seed is a NoCloud ISO; the public key is generated per run and
+          # exists only inside this runner's workspace.
           cloud-localds seed.iso user-data meta-data
 
-      - name: Boot the VM and run the spike
+      - name: Boot the guest
         run: |
           set -euo pipefail
           : > serial.log
           # BIOS boot (SeaBIOS) of the Generic cloud image; user-mode networking
-          # so dnf can reach the mirrors. Bounded by QEMU_TIMEOUT.
+          # with a forward to the guest's sshd, so the run is driven over a real
+          # channel instead of a console that a getty restart can hang up.
+          qemu-system-x86_64 \
+            -machine q35 -accel kvm -cpu host \
+            -smp 4 -m 6G \
+            -drive file=overlay.qcow2,if=virtio,format=qcow2 \
+            -drive file=seed.iso,media=cdrom \
+            -drive file=src.iso,media=cdrom \
+            -nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:${GUEST_SSH_PORT}-:22" \
+            -display none \
+            -serial file:serial.log \
+            -pidfile qemu.pid \
+            -no-reboot > qemu.log 2>&1 &
+        # Detached on purpose: the following steps talk to it over SSH, and the
+        # shutdown step waits for it. The runner's own cleanup is the backstop.
+
+      - name: Wait for sshd
+        run: |
+          set -euo pipefail
+          ssh_opts=(
+            -i "${RUNNER_TEMP}/spike_key" -p "${GUEST_SSH_PORT}"
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+            -o LogLevel=ERROR -o ConnectTimeout=10
+          )
+          deadline=$(( $(date +%s) + SSH_WAIT_SECONDS ))
+          until ssh "${ssh_opts[@]}" spikeci@127.0.0.1 true; do
+            if (( $(date +%s) >= deadline )); then
+              echo "guest sshd never answered within ${SSH_WAIT_SECONDS}s"
+              echo "---- qemu.log ----"; cat qemu.log || true
+              echo "---- serial.log (tail) ----"; tail -n 80 serial.log || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "guest is reachable over ssh"
+
+      - name: Wait for the source tree to be staged
+        run: |
+          set -euo pipefail
+          ssh_opts=(
+            -i "${RUNNER_TEMP}/spike_key" -p "${GUEST_SSH_PORT}"
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+            -o LogLevel=ERROR -o ConnectTimeout=10
+          )
+          for _ in $(seq 1 24); do
+            if ssh "${ssh_opts[@]}" spikeci@127.0.0.1 \
+              'sudo test -e /opt/spike/.staged && sudo test -f /opt/spike/Makefile'; then
+              echo "source tree staged in /opt/spike"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "cloud-init never staged /opt/spike"
+          echo "---- serial.log (tail) ----"; tail -n 80 serial.log || true
+          exit 1
+
+      - name: Install the build dependencies in the guest
+        run: |
+          set -euo pipefail
+          ssh -i "${RUNNER_TEMP}/spike_key" -p "${GUEST_SSH_PORT}" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR -o ServerAliveInterval=30 \
+            spikeci@127.0.0.1 \
+            'uname -a; head -3 /etc/os-release; sudo cat /sys/kernel/security/lsm; sudo cat /sys/kernel/security/lockdown; sudo bash /opt/spike/provision/fedora-deps.sh' \
+            2>&1 | tee deps.log
+
+      - name: Build and run every scenario
+        run: |
+          set -euo pipefail
+          ssh -i "${RUNNER_TEMP}/spike_key" -p "${GUEST_SSH_PORT}" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+            spikeci@127.0.0.1 \
+            'sudo env HOME=/root make -C /opt/spike test SUDO=' \
+            2>&1 | tee spike-run.log
+          # `set -o pipefail` makes the step fail on a non-zero guest status;
+          # the exit code is also read from the log in the gate step.
+        continue-on-error: true
+
+      - name: Record the result
+        run: |
+          set -euo pipefail
+          if grep -q "SUMMARY: ALL PASS" spike-run.log; then
+            echo "spike_summary=ALL PASS" >> "${GITHUB_OUTPUT}"
+          else
+            echo "spike_summary=MISSING OR FAILED" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "### Kernel spike, x86_64 (KVM)" >> "${GITHUB_STEP_SUMMARY}"
+          grep -E "^(PASS|FAIL|SUMMARY:)" spike-run.log \
+            | sed 's/^/    /' >> "${GITHUB_STEP_SUMMARY}" || true
+
+      - name: Upload the run logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kernel-spike-x86-64-logs
+          path: |
+            spike-run.log
+            deps.log
+            serial.log
+            qemu.log
+          if-no-files-found: warn
+
+      - name: Shut the guest down
+        if: ${{ always() }}
+        run: |
           set +e
-          timeout --signal=KILL "${QEMU_TIMEOUT}" \
-            qemu-system-x86_64 \
-              -machine q35 -accel kvm -cpu host \
-              -smp 4 -m 6G \
-              -drive file=overlay.qcow2,if=virtio,format=qcow2 \
-              -drive file=seed.iso,media=cdrom \
-              -drive file=src.iso,media=cdrom \
-              -nic user,model=virtio-net-pci \
-              -display none \
-              -serial file:serial.log \
-              -no-reboot
-          qemu_rc=$?
-          set -e
-          echo "qemu exit code: ${qemu_rc}"
-          echo "---- serial log (tail) ----"
-          tail -n 60 serial.log || true
+          ssh -i "${RUNNER_TEMP}/spike_key" -p "${GUEST_SSH_PORT}" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR -o ConnectTimeout=10 \
+            spikeci@127.0.0.1 'sudo poweroff'
+          if [ -f qemu.pid ]; then
+            pid="$(cat qemu.pid)"
+            for _ in $(seq 1 30); do
+              kill -0 "${pid}" 2>/dev/null || break
+              sleep 2
+            done
+            kill -0 "${pid}" 2>/dev/null && kill "${pid}" 2>/dev/null
+            wait "${pid}" 2>/dev/null
+          fi
+          echo "guest stopped"
 
       - name: Evaluate the result
         run: |
           set -euo pipefail
-          if ! grep -q "TIDEMARK-SPIKE-RC=0" serial.log; then
-            echo "spike did not finish cleanly (no TIDEMARK-SPIKE-RC=0 marker)"
+          if [ ! -s spike-run.log ]; then
+            echo "no spike run log: the guest never ran the suite"
             exit 1
           fi
-          if ! grep -q "SUMMARY: ALL PASS" serial.log; then
+          if ! grep -q "SUMMARY: ALL PASS" spike-run.log; then
             echo "spike did not report SUMMARY: ALL PASS"
             exit 1
           fi
-          echo "kernel spike passed: all Phase 0 assumptions held"
-
-      - name: Upload the serial log
-        if: ${{ always() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: kernel-spike-serial-log
-          path: serial.log
-          if-no-files-found: warn
+          if grep -qE "^FAIL" spike-run.log; then
+            echo "spike reported a failing scenario"
+            exit 1
+          fi
+          echo "kernel spike passed on x86_64: all Phase 0 assumptions held"

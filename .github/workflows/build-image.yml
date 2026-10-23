@@ -142,6 +142,11 @@ jobs:
           skopeo --version
           uname -r
 
+      - name: Check the pinned base-image digest
+        uses: ./.github/actions/check-base-digest
+        with:
+          containerfile: image/${{ matrix.containerfile }}
+
       - name: Build image
         run: |
           sudo podman build \
@@ -426,6 +431,11 @@ jobs:
             sudo apt-get install -y --no-install-recommends podman
           fi
           podman version
+
+      - name: Check the pinned base-image digest
+        uses: ./.github/actions/check-base-digest
+        with:
+          containerfile: image/Containerfile
 
       - name: Build image
         run: |

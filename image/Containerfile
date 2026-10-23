@@ -10,17 +10,25 @@
 #   podman build -f image/Containerfile -t localhost/tidemark:dev image/
 #
 # Base image: quay.io/fedora/fedora-bootc tag 45, pinned by the digest of its
-# multi-architecture OCI image index, resolved on 2026-10-16 at about 16:16 UTC
-# through https://quay.io/api/v1/repository/fedora/fedora-bootc/tag/?specificTag=45
-#   index (pinned below)  sha256:86cc9d98ef210b71a6c4eeec4b7d04e7fef0a4415184c2322a14c879df189f45
-#   linux/amd64 child     sha256:4e5c285af0fbf9698525a3c5ff6b6dbfc5c1d6102b0f1f46a48b2c437ffe533c
-#   linux/arm64 child     sha256:78d94543f47b1b147af00a83c5ecd79023db5073cb0c90fc74f4d00cae9a1ed4
+# multi-architecture OCI image index.
+# RE-PINNED 2026-10-23 (decision PD-14). The index resolved on 2026-10-16,
+# sha256:86cc9d98ef210b71a6c4eeec4b7d04e7fef0a4415184c2322a14c879df189f45, is
+# no longer retrievable: the registry answers "manifest unknown" for it, so the
+# daily rebuild eventually removes a pinned compose. A pinned digest is
+# therefore an identity, not a retention guarantee; the CI gate step resolves
+# the current tag digest before each build and records it in
+# docs/adr/2026-10-16_BaseImage_v1.md. Resolved on 2026-10-23 at about 15:20 UTC
+# through the Docker Registry v2 API
+# (GET /v2/fedora/fedora-bootc/manifests/45, Accept: image index):
+#   index (pinned below)  sha256:4c71411136f85da97cfc43d55291e13eec8cb2b2ff25ddf5ff5709ed093929da
+#   linux/amd64 child     sha256:a6492cc5d53a42ba421cd52c79d528dc484a0db59f5d504d3ac1563c9927de8a
+#   linux/arm64 child     sha256:7114b0bd9e7d2eea820e909fa7b1904b15f230a849e6aa4c03550e385429de9e
 #   (ppc64le and s390x children also exist; Tidemark does not build them)
-#   image version 45.20261016.0; amd64 kernel 7.2.9-300.fc45.x86_64 (ostree.linux label)
+#   image version 45.20261023.0; amd64 kernel 7.2.11-300.fc45.x86_64 (ostree.linux label)
 # The tag is rebuilt daily, so the digest is the identity. Renovate proposes
 # digest refreshes; moving to Fedora 46 requires a new base-image ADR.
 # Fallback build on Fedora 44: image/Containerfile.f44 (kept until launch).
-FROM quay.io/fedora/fedora-bootc:45@sha256:86cc9d98ef210b71a6c4eeec4b7d04e7fef0a4415184c2322a14c879df189f45
+FROM quay.io/fedora/fedora-bootc:45@sha256:4c71411136f85da97cfc43d55291e13eec8cb2b2ff25ddf5ff5709ed093929da
 
 LABEL org.opencontainers.image.title="AgentOS Tidemark (Phase 0 draft)" \
       org.opencontainers.image.description="Phase 0 pipeline-test image: boot self-test only, no Tidemark enforcement." \

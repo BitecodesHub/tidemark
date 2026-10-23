@@ -3,11 +3,24 @@
 # AgentOS Tidemark: OpenSSF Scorecard supply-chain analysis.
 # Status: Phase 0 draft (2026-10-16). See docs/2026-10-16_Image-Pipeline_v1.md.
 #
-# Results go to the repository's code-scanning page (SARIF) and, because
-# publish_results is true, to the public Scorecard API and badge. Publishing
-# requires a public repository; on a private repository set publish_results to
-# false. Scorecard restricts which steps may run in this job when publishing,
-# so keep it to the steps below.
+# Results go to the repository's code-scanning page (SARIF) and, when
+# publish_results is true, to the public Scorecard API and badge.
+#
+# STATUS 2026-10-23 (decision PD-15, recorded in the Phase 0 decisions ADR):
+# this job cannot work while the repository is private, and is therefore
+# non-gating. Two independent reasons, both observed:
+#   1. Scorecard needs to read commit history through the GraphQL API. The
+#      ephemeral Actions token cannot do that on a private repository, so the
+#      analysis aborts with "ListCommits: Resource not accessible by
+#      integration" (scorecard run 39965539746). The documented workaround is a
+#      personal access token stored as a repository secret; that trade is not
+#      made here, because putting a long-lived personal credential into the
+#      repository is a founder decision, not an automation decision.
+#   2. Publishing requires a public repository, so publish_results is false.
+#      Code-scanning uploads also need GitHub Advanced Security, which this
+#      private plan does not have (the secret-scanning endpoints answer 404).
+# At launch, when the repository becomes public, set publish_results back to
+# true and remove continue-on-error.
 #
 # Every third-party action is pinned by full commit SHA; the trailing comment
 # names the release tag.
@@ -15,12 +28,9 @@
 name: scorecard
 
 on:
-  branch_protection_rule:
   schedule:
     - cron: "29 5 * * 2"
-  push:
-    branches: [main]
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions: {}
 
@@ -29,11 +39,13 @@ jobs:
     name: Scorecard analysis
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # Non-gating while the repository is private; see the header note.
+    continue-on-error: true
     permissions:
       contents: read
       actions: read
       security-events: write # upload the SARIF file to code scanning
-      id-token: write # publish results to the Scorecard API
+      id-token: write # reserved for publishing once the repository is public
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,7 +57,7 @@ jobs:
         with:
           results_file: results.sarif
           results_format: sarif
-          publish_results: true
+          publish_results: false
 
       - name: Upload SARIF as an artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

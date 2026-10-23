@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Fail early, and name the current digest, when the quay.io/fedora/fedora-bootc
+# digest pinned in a Containerfile is no longer retrievable. A pinned digest is
+# an identity, not a retention guarantee: quay.io drops a compose's manifests
+# once the daily rebuild has replaced the tag, and podman then fails late with a
+# bare "manifest unknown" (build-image run 39965540155 on 2026-10-23 cost two
+# minutes of build work before saying nothing useful).
+#
+# This checks reachability only. It never rewrites a pin: re-pinning is a
+# recorded change, because the whole point of the digest is that a rebuild of
+# the same commit produces the same image (docs/adr/2026-10-16_BaseImage_v1.md).
+
+name: Check the pinned base-image digest
+description: >
+  Reads the fedora-bootc tag and digest pinned in a Containerfile, checks that
+  the digest is still retrievable from quay.io, and prints the tag's current
+  digest for comparison.
+
+inputs:
+  containerfile:
+    description: Path of the Containerfile whose FROM line carries the pin.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve and compare
+      shell: bash
+      env:
+        CONTAINERFILE_PATH: ${{ inputs.containerfile }}
+      run: |
+        set -euo pipefail
+        containerfile="${CONTAINERFILE_PATH}"
+        line="$(grep -m1 -E '^FROM quay\.io/fedora/fedora-bootc:' "${containerfile}")"
+        pinned="$(grep -oE 'sha256:[0-9a-f]{64}' <<<"${line}" || true)"
+        tag="$(sed -E 's|^FROM quay\.io/fedora/fedora-bootc:([0-9]+)@.*|\1|' <<<"${line}")"
+        if [ -z "${pinned}" ] || [ -z "${tag}" ]; then
+          echo "::error::${containerfile} does not pin fedora-bootc by tag and digest"
+          exit 1
+        fi
+        echo "pinned: tag ${tag} digest ${pinned}"
+        accept='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json'
+        tok="$(curl -fsSL 'https://quay.io/v2/auth?service=quay.io&scope=repository:fedora/fedora-bootc:pull' \
+          | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+        pinned_code="$(curl -s -o /dev/null -w '%{http_code}' \
+          -H "Authorization: Bearer ${tok}" -H "Accept: ${accept}" \
+          "https://quay.io/v2/fedora/fedora-bootc/manifests/${pinned}")"
+        current="$(curl -fsSL -D - -o /dev/null \
+          -H "Authorization: Bearer ${tok}" -H "Accept: ${accept}" \
+          "https://quay.io/v2/fedora/fedora-bootc/manifests/${tag}" \
+          | tr -d '\r' | awk 'tolower($1)=="docker-content-digest:"{print $2}' || true)"
+        echo "current digest of tag ${tag}: ${current:-unknown}"
+        if [ "${pinned_code}" != "200" ]; then
+          echo "::error::pinned digest ${pinned} is no longer retrievable (HTTP ${pinned_code}). Re-pin ${containerfile} and record the change in docs/adr/2026-10-16_BaseImage_v1.md. The tag's current digest is ${current:-unknown}."
+          exit 1
+        fi
+        if [ -n "${current}" ] && [ "${pinned}" != "${current}" ]; then
+          echo "::notice::pinned digest is reachable but older than tag ${tag} (${current}); Renovate proposes the refresh"
+        fi
