@@ -6,6 +6,7 @@
 # Jobs:
 #   actionlint      workflow files (actionlint also runs shellcheck on run: blocks)
 #   shellcheck      every *.sh file in the repository
+#   go-quality      gofmt, go vet and staticcheck over the spike Go module
 #   policy-schema   policy/default.yaml validated against spec/policy-v0.schema.json
 #   markdown-links  relative links in Markdown files (offline; non-gating)
 #
@@ -82,6 +83,78 @@ jobs:
           fi
           printf 'checking %s\n' "${scripts[@]}"
           shellcheck --external-sources "${scripts[@]}"
+
+  go-quality:
+    name: go fmt, vet and staticcheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GO_VERSION: "1.27.3"
+      # SHA-256 of go1.27.3.linux-amd64.tar.gz, read from
+      # https://go.dev/dl/?mode=json on 2026-10-23. It is deliberately the same
+      # toolchain the spike guest builds with (go1.27.3-X:nodwarf5), so a
+      # formatting or vet difference between the two build environments cannot
+      # appear.
+      GO_SHA256: 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+      # staticcheck v0.8.2 is release 2026.2.2 (2026-10-12), eleven days old at
+      # the time of pinning, which clears this project's 7-day cooldown.
+      STATICCHECK_VERSION: "v0.8.2"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Go (pinned by SHA-256)
+        run: |
+          tarball="go${GO_VERSION}.linux-amd64.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${tarball}" "https://go.dev/dl/${tarball}"
+          echo "${GO_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/go/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/go/bin/go" version
+
+      - name: gofmt
+        working-directory: spike
+        run: |
+          # Only tracked Go sources exist in a fresh checkout, so this cannot be
+          # distracted by the local .cache module tree.
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            echo "::error::these files are not gofmt-clean"
+            printf '  %s\n' "${unformatted}"
+            exit 1
+          fi
+          echo "gofmt: every file in the spike module is formatted."
+
+      - name: go vet
+        working-directory: spike
+        env:
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=mod
+          GOCACHE: ${{ runner.temp }}/gocache
+          GOMODCACHE: ${{ runner.temp }}/gomod
+        run: |
+          # -mod=mod is what the Makefile's build target uses: go.mod keeps only
+          # the two direct requires, so a fresh module cache resolves the
+          # transitive requirements of cilium/ebpf during this command.
+          go vet ./...
+
+      - name: staticcheck
+        working-directory: spike
+        env:
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=mod
+          GOCACHE: ${{ runner.temp }}/gocache
+          GOMODCACHE: ${{ runner.temp }}/gomod
+        run: |
+          go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
+          gobin="$(go env GOPATH)/bin"
+          export PATH="${gobin}:${PATH}"
+          staticcheck -version
+          staticcheck ./...
 
   policy-schema:
     name: policy schema
