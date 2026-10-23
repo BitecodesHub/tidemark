@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# AgentOS Tidemark: Developer Certificate of Origin check.
+# Status: Phase 0 (added 2026-10-23, checklist item E4 / PD-11).
+#
+# PD-11 adopts DCO 1.1: every commit carries a `Signed-off-by:` trailer, so the
+# sign-off is the record of who contributed the license grant and the provenance
+# travels with the commit rather than with a platform-only check. This workflow
+# enforces the rule in CI; commit hooks on contributor machines are optional
+# because a hook can be skipped and a CI check cannot.
+#
+# Scope, stated honestly:
+# - A pull request is checked over every commit the API lists for it.
+# - A push is checked over the commits the push introduced, so this check cannot
+#   fail on history that predates it. The first two commits of this repository
+#   were pushed before the check existed; `55f9b92` carries no trailer and the
+#   checklist records that rather than rewriting published history.
+# - A workflow dispatch checks HEAD only, which is the useful question at the
+#   end of a Phase 0 sprint.
+#
+# No third-party action is used, so there is nothing to pin beyond checkout
+# (v7.0.1 = 3d3c42e5aac5ba805825da76410c181273ba90b1, resolved 2026-10-23).
+
+name: dco
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dco-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sign-off:
+    name: every commit is signed off
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Collect the commits under review
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -eu
+          : > "${RUNNER_TEMP}/commits.txt"
+          case "${EVENT_NAME}" in
+            pull_request)
+              gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits" \
+                --paginate \
+                --jq '.[].sha' >> "${RUNNER_TEMP}/commits.txt"
+              echo "reviewing ${PR_NUMBER}: $(wc -l < "${RUNNER_TEMP}/commits.txt") commits"
+              ;;
+            push)
+              if [[ "${BEFORE}" =~ ^0+$ ]]; then
+                echo "new branch: reviewing HEAD only, so a branch created after this check exists cannot fail on its older history"
+                git rev-list "${AFTER}" -1 >> "${RUNNER_TEMP}/commits.txt"
+              elif git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+                echo "reviewing ${BEFORE}..${AFTER}"
+                git rev-list "${BEFORE}..${AFTER}" >> "${RUNNER_TEMP}/commits.txt"
+              else
+                echo "::warning::${BEFORE} is not reachable (force push or GC); reviewing HEAD only"
+                git rev-list "${AFTER}" -1 >> "${RUNNER_TEMP}/commits.txt"
+              fi
+              ;;
+            *)
+              echo "dispatch: reviewing HEAD only"
+              git rev-list HEAD -1 >> "${RUNNER_TEMP}/commits.txt"
+              ;;
+          esac
+
+      - name: Check the trailer
+        run: |
+          set -eu
+          missing=0
+          total=0
+          while read -r sha; do
+            [ -n "${sha}" ] || continue
+            total=$((total + 1))
+            short="$(git rev-parse --short "${sha}")"
+            subject="$(git log -1 --format=%s "${sha}")"
+            # DCO 1.1 needs a sign-off naming the person and the email the
+            # commit was authored with; any "Signed-off-by:" line is the
+            # convention, the value is checked for authorship below.
+            if ! git log -1 --format=%B "${sha}" | grep -qiE '^Signed-off-by: .+ <.+@.+\..+>'; then
+              echo "::error::${short} (\"${subject}\") has no Signed-off-by: trailer"
+              missing=$((missing + 1))
+            else
+              trailer="$(git log -1 --format=%B "${sha}" \
+                | grep -iE '^Signed-off-by: .+ <.+@.+\..+>' | tail -1)"
+              author_email="$(git log -1 --format=%ae "${sha}")"
+              if ! grep -qF -- "<${author_email}>" <<< "${trailer}"; then
+                echo "::warning::${short} is signed off by someone other than the commit author"
+              fi
+              printf '  ok  %s %s\n' "${short}" "${subject}"
+            fi
+          done < "${RUNNER_TEMP}/commits.txt"
+          echo "checked ${total} commit(s), ${missing} unsigned"
+          if [ "${missing}" -ne 0 ]; then
+            echo ""
+            echo "Sign off with: git commit --amend --signoff   (or -s on a new commit)"
+            echo "DCO 1.1: https://developercertificate.org/"
+            exit 1
+          fi
+
+      - name: Record the result
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          {
+            echo "### DCO"
+            echo
+            echo "- Trigger: \`${EVENT_NAME}\` at \`${GITHUB_SHA}\`"
+            echo "- Commits reviewed: $(wc -l < "${RUNNER_TEMP}/commits.txt")"
+            echo "- Rule: every commit carries \`Signed-off-by:\` naming the author (PD-11, DCO 1.1)"
+          } >> "${GITHUB_STEP_SUMMARY}"

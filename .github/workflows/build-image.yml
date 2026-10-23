@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # AgentOS Tidemark: build, boot-test, sign and publish the bootc image.
-# Status: Phase 0 draft (2026-10-16, revised after review). Not yet run.
-# See docs/2026-10-16_Image-Pipeline_v1.md.
+# Status: Phase 0 draft (2026-10-16, revised after review; first green run
+# 2026-10-23). See docs/2026-10-16_Image-Pipeline_v1.md.
 #
 # One workflow run carries one image from build to publication:
 #   1. build      builds each x86_64 variant once (Fedora 45 main image and
@@ -19,6 +19,15 @@
 #                 both signatures, attaches the SBOM as a signed attestation and
 #                 verifies it.
 # aarch64 is built natively but does not gate and is not published.
+#
+# Step 3 also requires the repository variable PUBLISH_IMAGES to equal "push"
+# (decision PD-17). Keyless cosign signing writes a public, permanent entry to
+# the Sigstore transparency log that names this repository and the published
+# digests, and the package itself becomes searchable - neither can be taken
+# back. Until the founder's launch decision (PD-10) makes the repository
+# public, publishing is an explicit opt-in:
+#   gh variable set PUBLISH_IMAGES --body push
+# The gate records the reason in the job summary when it skips.
 #
 # Pull requests and the weekly schedule run steps 1 and 2 only; nothing is
 # pushed and no write token is issued. The workflow starts on every pull
@@ -254,13 +263,56 @@ jobs:
     with:
       variant: ${{ matrix.variant }}
 
+  publish-decision:
+    name: record the publish decision
+    needs: [changes, build, boot-test]
+    # Always runs once the pipeline reaches this point, so that a skipped
+    # publication is a recorded decision rather than a silent absence (PD-17).
+    if: always() && needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Record
+        env:
+          OPT_IN: ${{ vars.PUBLISH_IMAGES }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BOOT: ${{ needs.boot-test.result }}
+        run: |
+          {
+            echo "### Image publication"
+            echo
+            echo "- boot-test result: \`${BOOT}\`"
+            echo "- trigger: \`${EVENT}\` on \`${REF}\`"
+            echo "- repository variable \`PUBLISH_IMAGES\` (only the exact value \`push\` publishes): \`${OPT_IN}\`"
+            if [ "${EVENT}" != "push" ] && [ "${EVENT}" != "workflow_dispatch" ]; then
+              echo "- not published: only a push or an explicit dispatch on main can publish."
+            elif [ "${REF}" != "refs/heads/main" ]; then
+              echo "- not published: not the main branch."
+            elif [ "${BOOT}" != "success" ]; then
+              echo "- not published: a boot test did not pass."
+            elif [ "${OPT_IN}" != "push" ]; then
+              echo "- not published: publication is opt-in."
+              echo "  Keyless cosign signing writes a public, permanent Sigstore"
+              echo "  transparency-log entry naming this repository, and the repository"
+              echo "  is not launched yet (PD-10, PD-17)."
+              echo "  Enable with \`gh variable set PUBLISH_IMAGES --body push\`."
+            else
+              echo "- eligible: the publish job will push and sign."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   publish:
     name: sign and publish (x86_64, ${{ matrix.variant }})
     needs: [changes, build, boot-test]
     if: >-
       needs.changes.outputs.image == 'true' &&
+      needs.boot-test.result == 'success' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      vars.PUBLISH_IMAGES == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     # No checkout and no contents permission: this job only handles the
