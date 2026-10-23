@@ -5,13 +5,16 @@ scripts, same source as
 [2026-10-23_Kernel-Spike-Results-aarch64_v2.md](2026-10-23_Kernel-Spike-Results-aarch64_v2.md),
 run on a different architecture inside GitHub Actions instead of on the host.
 Environment: `2026-10-23_Spike-Environment-x86_64_v1.txt`; transcripts:
-`2026-10-23_Spike-Run-x86_64-ci_v1.log` and the three repeats beside it.
+`2026-10-23_Spike-Run-x86_64-ci_v1.log` and the four repeats beside it.
 
 ## Executive summary
 
 **All 16 scenarios pass, 16 of 16, in four consecutive CI runs** under QEMU/KVM
 on a stock Fedora 45 Beta x86_64 guest (kernel `7.2.0-61.fc45.x86_64`, SELinux
-enforcing, Landlock ABI 10, lockdown `[none]`, BTF present). The four
+enforcing, Landlock ABI 10, lockdown `[none]`, BTF present). A fifth
+consecutive green run followed the same day on the same test code; it is
+described in "A fifth run, and what it changes" below rather than merged into
+the four-run tables. The four
 transcripts are identical in every PASS/FAIL, RESULT, DESC and race line; only
 latency numbers differ, as expected. Three of them were separate
 `workflow_dispatch` runs after the push-triggered one, so the result is not an
@@ -94,6 +97,40 @@ key, runs the suite over SSH, and keeps the serial log only as boot and oops
 evidence. Recorded as decision PD-16 in
 [../../docs/adr/2026-10-23_Phase0-Founder-Decisions_v1.md](../../docs/adr/2026-10-23_Phase0-Founder-Decisions_v1.md)
 and as the red warning block in `spike/README.md`.
+
+## A fifth run, and what it changes
+
+A fifth consecutive green run landed later the same day:
+[39982982413](https://github.com/BitecodesHub/tidemark/actions/runs/39982982413),
+push-triggered at commit `7b02d80`. Between `3f7c091` (the four runs above) and
+`7b02d80` the only file under `spike/` that differs is `spike/README.md`, which
+is not compiled, so the probe object, the loader and the test binaries are the
+same code. Its transcript is committed beside the others as
+`2026-10-23_Spike-Run-x86_64-ci_v5.log`.
+
+It is recorded as a fifth repetition and deliberately NOT folded into the tables
+above, because those tables say "median of the four runs" and re-deriving them
+would silently invalidate the range columns a reader can check against the
+transcripts. What the fifth run does say:
+
+- The 50 decision lines (RESULT, PASS/FAIL, DESC, LABEL, CAUSE, RACE, SUMMARY)
+  are byte-identical across all five transcripts once pids, temp-directory
+  names, cgroup ids and timings are normalised. Five runs, five
+  `SUMMARY: ALL PASS (16/16)`.
+- Scenario 16's five cases keep the same order, and the hook's cost is the same:
+  in-session unlabelled p50 4,138 ns minus outside-session 2,564 ns = +1,574
+  ns, against the four-run figure of +1,563 ns.
+- Five statistics in three of its rows fall outside the four-run ranges in the
+  table, each by less than a microsecond: the in-session unlabelled mean 4,792
+  against a range starting at 4,847 (-55 ns), the raise-path p50 5,751 against a
+  range ending at 5,681 (+70 ns), and the directory-rule run's p50 4,268, p99
+  21,931 and mean 4,996 against ranges of 4,158-4,259, 22,351-23,434 and
+  5,044-5,296 (+9 ns, -420 ns, -48 ns). Read correctly, those range columns are
+  the spread of four samples, not prediction intervals, and a fifth sample
+  landing just outside three of them is what a 0.1-1.9% run-to-run spread looks
+  like. The claim being made here - that the hook adds about 1.5-1.6 µs at p50
+  and never misses - is unaffected; the point is that the table must not be
+  quoted as a bound.
 
 ## What is now closed, and what is not
 

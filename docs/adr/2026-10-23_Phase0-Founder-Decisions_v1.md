@@ -229,6 +229,13 @@ which this private plan does not have (the secret-scanning endpoints answer
 404). Restore gating and publishing at launch, when the repository becomes
 public.
 
+Verified rather than assumed later the same day: dispatch run 39984799845
+reproduced the identical `ListCommits` error, the job concluded `failure` and
+the workflow run still concluded `success`. That is the whole of what
+`continue-on-error: true` buys here - the gap stays visible in the job while
+nothing that should gate is blocked by it. What it does not buy is a score, and
+none is claimed anywhere in the repository.
+
 **PD-16, how the x86_64 spike is driven.** The first version ran the whole
 suite inside a cloud-init `runcmd` whose output was redirected to `/dev/ttyS0`,
 and gated on a marker grepped from the serial log. Run 39965539646 left the
