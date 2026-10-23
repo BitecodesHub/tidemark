@@ -3,9 +3,12 @@
 > **Status: Phase 0, as of 23 October 2026. No product is implemented; the kernel mechanism is measured, not shipped.**
 > This repository holds research, plans, governance drafts, specifications and one measurement
 > instrument: the Phase 0 kernel spike in [`spike/`](spike/README.md), which builds and runs inside a
-> Fedora 45 virtual machine and passed 16 of 16 scenarios on aarch64 on 2026-10-23
-> (x86_64 pending; results in [`docs/spike-results/`](docs/spike-results/)). There is **no product to
-> install, no daemon, no image to download and no clearance enforcement running anywhere.** Every
+> Fedora 45 virtual machine and passed 16 of 16 scenarios on aarch64 and, in CI under QEMU/KVM, on
+> x86_64 on 2026-10-23 (results in [`docs/spike-results/`](docs/spike-results/)). There is **no product to
+> install, no daemon, no image to download and no clearance enforcement running anywhere.** The image
+> pipeline does build and boot both Fedora variants in CI, and by decision
+> [`PD-17`](docs/adr/2026-10-23_Phase0-Founder-Decisions_v1.md) it publishes nothing: no GHCR push and
+> no signing happen until publication is deliberately turned on. Every
 > feature below is a design target, not a shipped capability. The name "AgentOS Tidemark" is a
 > working name pending trademark clearance (see [TRADEMARK.md](TRADEMARK.md)). The repository is
 > currently private; the interview coding rules, spike evidence and decisions are all in it and are
@@ -35,7 +38,7 @@ are:
 | Primitive | Planned mechanism | Status |
 |---|---|---|
 | Session principal | One systemd transient unit per agent run: cgroup subtree, loopback-only network namespace, strict Landlock (ABI 9 or later), seccomp deny list, no namespace creation | Not started |
-| Kernel-recorded read-time labels | Sleepable BPF LSM programs on `file_open` and `file_receive` raise the session's label word before the labelled `open()` returns; a file's label is the union of its `security.bpf.*` xattr and every matching directory rule | Phase 0 kernel spike passed 16 of 16 scenarios on aarch64 (Fedora 45 Beta, kernel 7.2.0-61, three identical runs, 2026-10-23; 12 of 12 on 2026-10-18), including the 10,000-iteration raise-before-return race in both the opener and a separate observer reading; x86_64 not yet run. Measured on an instrument that only observes: no production labeller exists |
+| Kernel-recorded read-time labels | Sleepable BPF LSM programs on `file_open` and `file_receive` raise the session's label word before the labelled `open()` returns; a file's label is the union of its `security.bpf.*` xattr and every matching directory rule | Phase 0 kernel spike passed 16 of 16 scenarios on aarch64 (Fedora 45 Beta, kernel 7.2.0-61, three identical runs, 2026-10-23; 12 of 12 on 2026-10-18) and 16 of 16 on x86_64 (same kernel version, four identical GitHub Actions QEMU/KVM runs, 2026-10-23), including the 10,000-iteration raise-before-return race in both the opener and a separate observer reading and the overlayfs case on each architecture. Measured on an instrument that only observes: no production labeller exists |
 | Clearance-gated exits | `tidemark-gw`: one Unix socket per session; the session's current label is re-checked against the destination's clearance before **every forwarded chunk**; tunnels are reset when the label rises; DNS, UDP and IP literals are refused | Not started |
 | Label-constrained model broker | `tidemark-broker`: OpenAI Chat Completions; a labelled session is placed only on backends cleared for its label (by default the local llama-server), otherwise it fails closed with a reason; the broker alone holds API keys | Not started |
 | Staged writes with label stamping | overlayfs staging; `commit` (run outside the session) stamps written files with the session's final label; auto-exec, hook and skill files wait for `accept`; agent memory is partitioned by label; `abort` restores the workspace byte for byte | Not started |
@@ -133,7 +136,7 @@ yet):
 | `policy/default.yaml` | Default policy (no component reads it yet) |
 | `docs/2026-10-16_Image-Pipeline_v1.md` | Image pipeline design: base pinning, self-test, CI workflows, verification |
 | `image/` | Containerfiles (Fedora 45 and the Fedora 44 fallback), first-boot and self-test units for the image pipeline test (no enforcement) |
-| `spike/` | Phase 0 kernel spike: BPF probe, Go loader, 16 scenario scripts and Lima template (passed 16 of 16 on aarch64 on 2026-10-23, 12 of 12 on 2026-10-18; results in `docs/spike-results/`) |
+| `spike/` | Phase 0 kernel spike: BPF probe, Go loader, 16 scenario scripts and Lima template (passed 16 of 16 on aarch64 and on x86_64 in CI on 2026-10-23, 12 of 12 on 2026-10-18; results in `docs/spike-results/`) |
 | `.github/workflows/` | Image build, boot test, kernel spike, lint and Scorecard workflows (not yet run) |
 | `renovate.json` | Dependency update rules for pinned digests and actions |
 | `LICENSE`, `NOTICE` | Apache License 2.0 and project notice |

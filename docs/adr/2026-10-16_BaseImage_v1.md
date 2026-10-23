@@ -1,10 +1,15 @@
 # Base image: fedora-bootc:45 pinned by digest, with a :44 fallback
 
-- **Status:** Proposed (Phase 0 draft, revised 2026-10-16 after review and
-  2026-10-17 in a cross-file consistency pass; founder review in week 3)
+- **Status:** Accepted (Phase 0 draft, revised 2026-10-16 after review,
+  2026-10-17 in a cross-file consistency pass, and 2026-10-23 for the digest
+  re-pin record and the kfunc correction under decisions PD-1, PD-2 and PD-14;
+  founder review in week 3)
 - **Date:** 2026-10-16
 - **Phase:** 0 (Foundations and kill gate)
-- **Deciders:** Founder
+- **Deciders:** Founder; the 2026-10-23 re-pin was decided by the AI assistant
+  under the founder's explicit 2026-10-23 delegation
+  ([2026-10-23_Phase0-Founder-Decisions_v1.md](2026-10-23_Phase0-Founder-Decisions_v1.md),
+  PD-14) and has had no founder line-by-line review yet
 
 ## Context
 
@@ -13,11 +18,14 @@ needs at once:
 
 1. A kernel new enough for the primitives. Landlock ABI 9 (pathname Unix socket
    scoping) requires Linux 7.1, and the read-time labeller depends on the fs
-   kfuncs `bpf_get_file_xattr`, `bpf_path_d_path` and `bpf_real_data_inode` and
-   on the sleepable BPF LSM hooks `file_open` and `file_receive`.
-   `bpf_real_data_inode` first appears in Linux 7.2, so the v0.1 floor is
-   **Linux 7.2 or later with Landlock ABI 9 or later** (see
-   `docs/adr/2026-10-16_Labeller-BPF-LSM_v1.md`).
+   kfuncs `bpf_get_file_xattr` and `bpf_path_d_path` and on the sleepable BPF
+   LSM hooks `file_open`, `file_receive` and `mmap_file`.
+   `bpf_real_data_inode` first appears in Linux 7.2 and was on this list until
+   the Phase 0 spike: decision PD-1 removed the inode-storage cache it served,
+   so it is no longer a dependency (see
+   `docs/adr/2026-10-16_Labeller-BPF-LSM_v1.md`). The v0.1 floor stays at
+   **Linux 7.2 or later with Landlock ABI 9 or later** as a policy choice, not
+   as a kfunc constraint (PD-2).
 2. A multi-architecture base, because the founder develops on an Apple M1 Pro
    (aarch64) and gates releases on free x86_64 KVM CI runners.
 3. A base a solo, part-time maintainer can track without running a distribution.
@@ -40,7 +48,8 @@ Evidence verified against primary sources on 2026-10-16:
   `7.2.9-300.fc45.x86_64` and the arm64 child reads `7.2.9-300.fc45.aarch64`
   (image version `45.20261016.0`). A 7.2 kernel meets the 7.2 floor, provides
   Landlock ABI 10 (`landlock_abi_version` is 8, 9 and 10 at the v7.0, v7.1 and
-  v7.2 tags), and carries all three required kfuncs.
+  v7.2 tags), and carries both kfuncs the labeller now depends on
+  (`bpf_get_file_xattr`, `bpf_path_d_path`).
 - **The :45 tag is not new.** The quay.io tag history for `:45` (including
   inactive tags) goes back to 2026-06-01; the tag is rebuilt frequently, which
   is why the digest and its resolution date are recorded.
@@ -68,21 +77,48 @@ Build the image `FROM quay.io/fedora/fedora-bootc:45`, pinned by the digest
 `sha256:86cc9d98ef210b71a6c4eeec4b7d04e7fef0a4415184c2322a14c879df189f45`
 resolved on 2026-10-16.
 
+### Re-pin record
+
+A pinned digest identifies a compose; it does not keep it retrievable. quay.io
+drops a compose's manifests once the daily rebuild has moved the tag, so a pin
+must be refreshed by a recorded change.
+
+| Date (UTC) | Tag | Digest that was pinned | Still retrievable? | Replacement index digest | Compose / amd64 kernel |
+|---|---|---|---|---|---|
+| 2026-10-16 | 45 | `sha256:86cc9d98…df189f45` | no (`manifest unknown` on 2026-10-23) | `sha256:4c71411136f85da97cfc43d55291e13eec8cb2b2ff25ddf5ff5709ed093929da` | 45.20261023.0 / `7.2.11-300.fc45.x86_64` |
+| 2026-10-16 | 44 | `sha256:9db34195…9eeaced` | no (`manifest unknown` on 2026-10-23) | `sha256:03808453feb5369ed6b074421117b56734f3a6dff8e25d9e0ddff0e48e4d6d2e` | 44.20261023.0 / `7.2.11-200.fc44.x86_64` |
+
+Both replacements were resolved on 2026-10-23 at about 15:20 UTC through the
+Docker Registry v2 API (`GET /v2/fedora/fedora-bootc/manifests/<tag>`, reading
+the `Docker-Content-Digest` response header for the OCI image index), with the
+per-architecture children read from that index and the compose version and
+kernel from each child's image config labels. Recorded under PD-14; the first
+build against the 2026-10-16 pins failed in CI (build-image run 39965540155)
+before this was known.
+
 - Pin by digest, not by the floating `:45` tag. Renovate proposes digest bumps,
   which merge only after the boot test and the read matrix pass.
+- CI checks reachability before building:
+  `.github/actions/check-base-digest` reads the pin out of the Containerfile,
+  asks the registry whether that digest still resolves, prints the tag's current
+  digest, and fails with that name if the pin is gone. It never rewrites a pin.
+  Auto re-pinning was rejected because an image labelled with one digest must not
+  be built from another compose's content.
 - Keep a parallel fallback build `FROM quay.io/fedora/fedora-bootc:44`
   (digest `sha256:9db34195bc0b6be43e17c20ca840be5bc153093c94b62f6792a76fb199eeaced`,
-  2026-10-16) in `image/Containerfile.f44`, maintained until launch, so a
-  regression in the 45 line does not block the project.
+  2026-10-16, re-pinned 2026-10-23 as above) in `image/Containerfile.f44`,
+  maintained until launch, so a regression in the 45 line does not block the
+  project.
 - The image build file paths are owned by the `image_pipeline` work, not by this
   ADR; this ADR fixes only the base and the pinning policy.
 - A boot self-test asserts, at first boot, a kernel of 7.2 or later, Landlock
   ABI >= 9, that the active LSM list contains bpf and landlock, and that the
-  required kfuncs (including `bpf_real_data_inode` until checklist item C2
-  decides otherwise) are present. From Phase 1, sessions refuse to start if any
-  assertion fails; in Phase 0 the self-test only reports. The Phase 0 self-test
-  script (`image/selftest/tidemark-selftest.sh`, owned by the image pipeline)
-  already checks the 7.2 floor and the three kfunc names.
+  required kfuncs are present. C2 decided on 2026-10-23 (PD-1): the cache is
+  out, so `bpf_real_data_inode` is not in the required list and the self-test
+  checks `bpf_get_file_xattr` and `bpf_path_d_path`. From Phase 1, sessions
+  refuse to start if any assertion fails; in Phase 0 the self-test only reports.
+  The Phase 0 self-test script (`image/selftest/tidemark-selftest.sh`, owned by
+  the image pipeline) already checks the 7.2 floor and the two kfunc names.
 
 ## Consequences
 

@@ -613,7 +613,9 @@ time.
   `sha256:9db34195bc0b6be43e17c20ca840be5bc153093c94b62f6792a76fb199eeaced`
   (kernel 7.2.10-200.fc44), from the quay.io API. The authoritative pin is
   recorded in `docs/adr/2026-10-16_BaseImage_v1.md`, and the benchmark records
-  the digest it actually ran.
+  the digest it actually ran. Both 16 October digests were unretrievable by
+  2026-10-23 and have been re-pinned (decisions ADR PD-14) - the reason the
+  benchmark pins by digest *and* records the digest it resolved at run time.
 - systemd credential injection through QEMU `fw_cfg`
   (`-fw_cfg name=opt/io.systemd.credentials/<name>,string=<value>`), the
   55-character limit on names passed that way, and SMBIOS OEM strings as the

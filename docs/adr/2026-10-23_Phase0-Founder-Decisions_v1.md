@@ -62,6 +62,11 @@ logs `2026-10-23_Spike-Run-aarch64_v1.log` through `_v3.log`,
 | PD-11 | FD-D | **DCO**, not a CLA. |
 | PD-12 | FD-E | The interview coding rules **keep every default in synthesis template section A.4**, which are the stricter reading in each case; the freeze is published as the SHA-256 of the frozen file in devlog 1. |
 | PD-13 | FD-F | The screener is a **self-hosted, privacy-respecting form with no incentive** offered. |
+| PD-14 | found in CI | **Base-image digests are re-pinned by hand, and CI checks reachability before building.** The 16 October digests are gone from the registry, so a pin is an identity, not a retention guarantee. |
+| PD-15 | found in CI | **OpenSSF Scorecard is non-gating while the repository is private**, and no long-lived personal token is added as a repository secret to make it work. |
+| PD-16 | found in CI | **The x86_64 spike is driven over SSH** with a per-run ephemeral key; the serial log is boot and oops evidence only, and the source ISO is built from `git archive`. |
+| PD-17 | found in CI, blocks AC6 | **Image publication is opt-in.** `push` to GHCR and keyless cosign signing run only while the repository variable `PUBLISH_IMAGES` is `push`; a passing build and boot test no longer publish by themselves. |
+| PD-18 | E4, S2 | **Branch protection stays off while the repository is private and solo**, and secret scanning is not requested: the settings API returns 404 for this repository, so there is nothing to enable. DCO, gofmt, staticcheck, pinned Actions, SBOM and the report-only vulnerability scan are all in place. |
 
 ### PD-1: no inode cache
 
@@ -184,6 +189,112 @@ it rather than substituted for it. The freeze is published before P01 as the
 SHA-256 of the synthesis template recorded in devlog 1, which is what F1 asks
 for and does not require a public commit of the whole file.
 
+### PD-14, PD-15 and PD-16: found in the first CI run
+
+The first CI run on the new repository failed in all four workflows, and each
+failure was infrastructure rather than the kernel mechanism, so each needed a
+recorded call.
+
+**PD-14, base-image digests.** The image pipeline pins
+`quay.io/fedora/fedora-bootc` by the digest of its multi-architecture index. On
+23 October the first real build reported `manifest unknown` for both 16 October
+pins: index `sha256:86cc9d98…189f45` for tag 45 and `sha256:9db34195…9eeaced`
+for tag 44. A pinned digest therefore identifies a compose; it does not keep it
+retrievable, because quay.io drops a compose's manifests once the daily rebuild
+has moved the tag. Decision: re-pin by hand to the digests resolved on
+23 October (tag 45 index `sha256:4c714111…93929da`, version 45.20261023.0, amd64
+kernel `7.2.11-300.fc45.x86_64`; tag 44 index `sha256:03808453…8e4d6d2e`, version
+44.20261023.0, kernel `7.2.11-200.fc44.x86_64`, both read from the image config's
+`ostree.linux` label), record every re-pin in the base-image ADR, and add a
+pre-build check that resolves the tag, tests whether the pinned digest is still
+retrievable, prints the tag's current digest, and fails with that name instead
+of letting podman fail two minutes later. Rejected: build against the moving
+tag, or re-pin automatically inside CI. Either would let an image labelled with
+one digest contain another compose's content, which is the exact failure mode
+the pin exists to prevent.
+
+**PD-15, Scorecard.** Scorecard aborts on a private repository before analysis:
+`scorecard had an error: internal error: ListCommits:error during
+graphqlHandler.setup: githubv4.Query: Resource not accessible by integration`
+(run 39965539746). The documented remedy is a personal access token with `repo`
+scope stored as a repository secret. Decision: keep the workflow, run it on
+schedule and by hand only, set `publish_results: false` and make the job
+non-gating, and record the gap honestly rather than claim a supply-chain
+score. Reasoning: minting a long-lived personal credential and storing it in the
+repository is a change to the founder's account security posture with a far
+wider blast radius than the missing metric, and two of Scorecard's three
+outputs are unavailable on this plan anyway - publishing needs a public
+repository, and code-scanning SARIF upload needs GitHub Advanced Security,
+which this private plan does not have (the secret-scanning endpoints answer
+404). Restore gating and publishing at launch, when the repository becomes
+public.
+
+**PD-16, how the x86_64 spike is driven.** The first version ran the whole
+suite inside a cloud-init `runcmd` whose output was redirected to `/dev/ttyS0`,
+and gated on a marker grepped from the serial log. Run 39965539646 left the
+runner with `qemu exit code: 0`, no marker, and no explanation: while dnf was
+still running, `serial-getty@ttyS0` restarted, its `vhangup()` replaced the
+already-open stdout and stderr of the runcmd shell with the hung-up tty's file
+operations, and every later write - the build log, the scenario results and the
+result marker itself - returned `-EIO` and was discarded. The run's outcome was
+unknowable, which is the one thing a gate may not produce. Decision: keep QEMU,
+KVM and the pinned Beta compose, but drive the guest over SSH through QEMU
+user-mode networking with a host forward; generate an ed25519 key pair per run
+and put only the public half in the seed ISO; keep the serial log as an artifact
+for boot failures and kernel oops, never as the verdict channel; and build the
+source ISO from `git archive HEAD spike` rather than the working directory, so
+the aarch64 build products that live in the local tree (`label_probe.bpf.o`,
+`tidemark-probe`, `bpf/vmlinux.h`, whose mtimes are newer than the sources)
+cannot be carried into an x86_64 guest and reused as if already built for that
+architecture. Cost: the job now depends on the guest's sshd, which is present
+and enabled in the Fedora Cloud image; if it ever does not answer, the job says
+so and prints the serial tail. This is instrument methodology, not a product
+change.
+
+**PD-17, how the image pipeline publishes.** With the first green build of
+`tidemark-image.yml`, the `publish` job became reachable: its guard was
+`image`-path changes plus a push to `main`, and the matrix boot tests were
+network-dependent, not part of the job's requirements beyond `needs`. On the
+first run that completed the build and the Fedora 45 boot test, publication was
+about to start on the Fedora 44 boot test finishing - which would have pushed
+`ghcr.io/bitecodesHub/tidemark-bootc` images and, through keyless cosign,
+written **public, permanent entries to the Sigstore Rekor transparency log**
+naming this private, unlaunched repository and its layer digests. A Rekor entry
+cannot be retracted; the log is mirrored and searched. The repository is private
+under PD-10 precisely because the launch decision is the founder's, and this
+side effect is the least reversible one in the pipeline.
+
+Decision: the workflow still builds and boots on every change to the image
+inputs, but publishing requires the repository variable `PUBLISH_IMAGES` to equal
+`push`, and the publish job now also requires `needs.boot-test.result ==
+'success'` explicitly rather than relying on `needs` alone. A new
+`publish-decision` job runs on every image-path run and writes to the run summary
+what it found - the boot-test result, the trigger, the current `PUBLISH_IMAGES`
+value, and one of five named reasons for skipping - so "why did this not publish"
+is answered by the log rather than by reading the workflow. Enabling publication
+is one command (`gh variable set PUBLISH_IMAGES --body push`) and is the
+founder's call, made when the repository goes public or when a consumer needs a
+pulled image. AC6 is therefore **deferred by one deliberate command**, not met.
+
+**PD-18, branch protection and secret scanning.** E4 asks for both, and neither
+is a code change, so the honest reading of "who owns this" is a decision rather
+than a task. Branch protection with required status checks is turned off on
+purpose: Phase 0 is one person pushing documentation, evidence transcripts and
+spike fixes straight to `main`, often in the same hour a CI run finishes, and a
+required-check rule would make every one of those commits wait on a merge
+through a PR whose only reviewer would be the same person. It is also the one
+E4 item that can be added later with no loss: a single `gh api` call that PUTs
+protection on `main` requiring `lint`, `kernel-spike` and `dco` takes a minute,
+and the right moment is the first outside contributor or the move to public,
+whichever comes first. Secret scanning
+and push protection are not available: both endpoints answer HTTP 404 for this
+private repository on this plan, so the item cannot be ticked by clicking
+anything. What the plan can and does get now is the parts that are code:
+`Signed-off-by` enforcement, gofmt and staticcheck, every Action pinned by
+commit SHA, a per-build SBOM and a report-only vulnerability scan, and the
+dependency graph with vulnerability alerts enabled. E4 and S2 stay open on their
+named items rather than being reworded until they pass.
+
 ## Consequences
 
 **Becomes easier.** The labeller ADR's kernel-floor dependency drops out; C2 and
@@ -212,6 +323,20 @@ namespaces, which Phase 0 does not test; if Phase 1 finds those hooks cannot see
 the operation, the fallback is to deny the operation by other means or to
 narrow the directory-rule claim, and either outcome is a documented limitation
 rather than a silent hole. Kill criterion 1 still needs the x86_64 half.
+
+**Amended later the same day.** The x86_64 half has now run (PD-16): 16 of 16 in
+four consecutive CI runs on the same scripts, reported in
+`docs/spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md`, so the
+"either architecture" condition of criterion 1 is measured rather than assumed.
+The latency caveat also sharpened with the second architecture: the labeller
+delta is about +0.38 µs p50 on the aarch64 Lima VM but about +1.56 µs p50 on the
+CI guest, which QEMU gives 4 vCPU on a runner whose KVM recommends 2. Both are
+floors measured in one process around `open(2)`, and neither is a product
+number. The `inode_link`/`path_rename` question above is unchanged: still
+untested in Phase 0. One further decision came from the same CI session and is
+recorded here rather than in a second ADR: PD-17, publication is opt-in, after
+keyless signing was found to be one boot test away from writing an irreversible
+public transparency-log entry for a private repository.
 
 ## Alternatives considered
 
@@ -248,6 +373,35 @@ rather than a silent hole. Kill criterion 1 still needs the x86_64 half.
   kill criterion 2 is built on.
 - **Gate FD-3 on the designed-workflow reading (PD-12).** Rejected: it is the
   looser option, and the freeze must not be chosen to make a criterion pass.
+- **Build `FROM quay.io/fedora/fedora-bootc:45` by tag, or re-pin it in CI
+  (PD-14).** Rejected: the digest is the identity that makes "this commit built
+  this image" mean something, and an automatic refresh would let an image
+  labelled with one digest carry another compose's content while pretending
+  otherwise.
+- **Store a personal access token as a repository secret to make Scorecard work
+  on the private repository (PD-15).** Rejected: it converts a short-lived,
+  least-privilege CI credential into a long-lived one on the founder's account,
+  for a metric whose two public outputs (badge and code-scanning SARIF) are not
+  available on this plan anyway.
+- **Keep the x86_64 spike on the serial console and hope the marker survives
+  (PD-16).** Rejected after measuring why it did not: a getty restart silently
+  swallows the rest of the transcript, so the gate would sometimes be unable to
+  tell a pass from a lost log.
+- **Ship the x86_64 spike from the local working tree as before (PD-16).**
+  Rejected: `git archive` is the only way to guarantee the guest builds from
+  sources, because the local tree carries aarch64 objects newer than every
+  source file.
+- **Let the first green build publish to GHCR and sign automatically (PD-17).**
+  Rejected after reading what keyless signing does: it writes a public,
+  permanent Rekor entry naming the repository and its digests, which is
+  irreversible, visible to anyone searching the log, and inconsistent with a
+  private, unlaunched repository whose publication is an open founder decision.
+  Publishing stays one variable away, so nothing is lost but the surprise.
+- **Turn on branch protection with required checks today (PD-18).** Rejected for
+  Phase 0: it would gate every evidence commit behind a self-review on a solo
+  repository, and it is fully recoverable in a minute at the moment collaborators
+  appear. The compensating controls that matter for a spike - pinned Actions,
+  sign-off checks, lint and a report-only scan - are all already running.
 
 ## References
 
@@ -261,6 +415,11 @@ rather than a silent hole. Kill criterion 1 still needs the x86_64 half.
   the 16/16 runs, the two configuration experiments, the latency table.
 - [../spike-results/2026-10-23_Spike-Environment-aarch64_v2.txt](../spike-results/2026-10-23_Spike-Environment-aarch64_v2.txt) -
   kernel, toolchain and object digest for the runs.
+- [../spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md](../spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md) -
+  the four CI runs that closed the x86_64 half of criterion 1, and the latency
+  comparison that amended the caveat above.
+- [../../.github/workflows/build-image.yml](../../.github/workflows/build-image.yml) -
+  where PD-14's reachability check and PD-17's `PUBLISH_IMAGES` guard live.
 - [../../spike/README.md](../../spike/README.md) - scenario-to-assumption
   mapping, licence note, `TM_DISABLE_INODE_CACHE`, `# TIMEOUT:`.
 - [../interviews/2026-10-19_Synthesis-Template_v1.md](../interviews/2026-10-19_Synthesis-Template_v1.md) -

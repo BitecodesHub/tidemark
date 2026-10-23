@@ -107,18 +107,43 @@ limactl shell tidemark-spike -- sudo make -C /opt/tidemark-spike test SUDO=
 macOS asks once for permission before `limactl` can share a folder under
 `~/Desktop`. The build writes `bpf/vmlinux.h`, the object, the binary, `go.sum`
 and `.cache/` into the shared `spike/` directory; `spike/.gitignore` excludes
-everything except `go.sum`, which should be reviewed and committed after the
-first successful run.
+everything except `go.sum`, which was reviewed and committed after the first
+successful run.
 
-### x86_64 in CI (QEMU/KVM)
+### x86_64 in CI (QEMU/KVM, driven over SSH)
 
 The `.github/workflows/kernel-spike.yml` workflow runs on `workflow_dispatch`
-and on any change under `spike/`. It boots a stock Fedora 45 Cloud image under
-QEMU/KVM on a free `ubuntu-24.04` runner, installs the dependencies through
-cloud-init, runs `make test`, and gates on `SUMMARY: ALL PASS` printed to the
-serial console. The serial log is uploaded as an artifact. The job tests the
-kernel of the pinned Beta compose (7.2.0-61.fc45) on purpose, for
-reproducibility; re-pin to the GA image within a week of the Fedora 45 release.
+and on any change under `spike/`. It boots a stock Fedora 45 Cloud image (the
+pinned Beta compose, kernel 7.2.0-61.fc45, deliberately not the newest 7.2.x,
+for reproducibility) under QEMU/KVM on a free `ubuntu-24.04` runner, then builds
+and runs `make test` **over SSH** through QEMU user-mode networking with a host
+forward, and gates on `SUMMARY: ALL PASS` in the captured transcript plus a zero
+exit status from the guest. Re-pin to the GA image within a week of the Fedora
+45 release.
+
+Three things about that design are load-bearing, and all three were learned from
+a failed run rather than from reading:
+
+- **The verdict is never read off the serial console.** The first version ran
+  the whole suite inside a cloud-init `runcmd` with stdout redirected to
+  `/dev/ttyS0` and grepped the log for a completion marker. In run
+  39965539646 (2026-10-23) `serial-getty@ttyS0` restarted while dnf was still
+  working; its `vhangup()` replaced the runcmd shell's already-open stdout and
+  stderr with the hung-up tty's file operations, so every later write returned
+  `-EIO` and was discarded. The guest powered off cleanly, `qemu` exited 0, and
+  the transcript stopped at the point of the restart: the run could not be read
+  as either a pass or a fail. The serial log is still uploaded, but only as
+  evidence about boot and kernel oops.
+- **The SSH key is generated per run.** `ssh-keygen` makes an ed25519 pair in
+  the runner's temp directory and only the public half goes into the NoCloud
+  seed, for a `spikeci` user in the `sudo` group with `NOPASSWD`. Nothing is
+  committed and nothing is a secret.
+- **The source reaches the guest as `git archive HEAD spike`, not as the working
+  tree.** The local `spike/` directory holds aarch64 products (`bpf/vmlinux.h`,
+  `label_probe.bpf.o`, `tidemark-probe`) whose mtimes are newer than every
+  source file, so a copy of the tree would let the guest's `make` treat an
+  arm64 object and binary as already built for x86_64. The workflow asserts the
+  absence of all three in the staging directory before it builds the ISO.
 
 `make test` installs a copy of the helper to `/usr/local/libexec/tidemark-probe`
 and runs that copy, because the helper is executed inside sessions and the
@@ -362,6 +387,9 @@ stock-Fedora-45 spike.
   `sha256:86cc9d98ef210b71a6c4eeec4b7d04e7fef0a4415184c2322a14c879df189f45`;
   the `:44` fallback to
   `sha256:9db34195bc0b6be43e17c20ca840be5bc153093c94b62f6792a76fb199eeaced`.
+  Both were quarantined by quay.io manifest GC on 2026-10-23 and are
+  superseded; `docs/adr/2026-10-16_BaseImage_v1.md` is the authoritative and
+  dated re-pin record.
 
 ## The `bpf_real_data_inode` fallback
 

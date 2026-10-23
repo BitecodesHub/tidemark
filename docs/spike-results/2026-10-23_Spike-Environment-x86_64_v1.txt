@@ -1,0 +1,55 @@
+Tidemark Phase 0 kernel spike - environment snapshot (2026-10-23, x86_64, CI)
+
+Host        : GitHub Actions runner `ubuntu-24.04` (ephemeral, hosted), QEMU/KVM
+              q35, -cpu host, 4 vCPU requested (KVM recommends 2; the guest is
+              CPU-oversubscribed, which is recorded because it affects the
+              latency tail), 6 GiB RAM, overlay qcow2 root disk
+Guest image : Fedora-Cloud-Base-Generic-45_Beta-1.3.x86_64.qcow2
+              sha256 06bd4382a3bc5e5f94cd520f9ee15bdfb38d7bb72552b27fe06d581ba9a84292
+              (verified against the GPG-signed CHECKSUM by the workflow before boot)
+Kernel      : 7.2.0-61.fc45.x86_64 (#1 SMP PREEMPT_DYNAMIC Mon Aug 17 12:39:57 UTC 2026)
+Arch        : x86_64
+Active LSMs : lockdown,capability,yama,selinux,bpf,landlock,ipe,ima,evm
+Landlock    : ABI 10 (floor 9)
+Lockdown    : [none] (integrity, confidentiality available)
+BTF         : /sys/kernel/btf/vmlinux present; bpf/vmlinux.h regenerated from it
+SELinux     : enforcing=1 (audit log at boot, kernel 7.2.0-61 guest policy)
+Toolchain   : clang version 23.1.4 (Fedora 23.1.4-1.fc45)
+              bpftool v7.7.0, libbpf 1.7.0
+              go version go1.27.3-X:nodwarf5 linux/amd64
+Go deps     : github.com/cilium/ebpf v0.22.0, golang.org/x/sys v0.43.0 (spike/go.sum)
+
+Build products under test: label_probe.bpf.o and tidemark-probe are rebuilt
+inside the guest on every run, from the source staged on the read-only
+TMSPIKE volume (see the note on `git archive` in spike/README.md). The CI
+artifact ships text logs only, so their sha256 values are not recorded here;
+the object is compiled with `-target bpf -mcpu=v3 -D__TARGET_ARCH_x86`, which
+together with the regenerated vmlinux.h shows that these runs did not reuse any
+aarch64 build product.
+
+Suite: the same 16 scenario scripts in spike/tests that pass on aarch64 - 12
+from 2026-10-18 plus 13_session_move_out, 14_xattr_and_rule_invalidation,
+15_race_10k_iterations and 16_open_latency_baseline (added 2026-10-23). The
+helper runs from /usr/local/libexec/tidemark-probe, not from a shared folder
+(see spike/README.md).
+
+Runs recorded on 2026-10-23 (all end with SUMMARY: ALL PASS (16/16)):
+  2026-10-23_Spike-Run-x86_64-ci_v1.log
+        workflow run 39978024715, job 120497656286, push trigger (commit 3f7c091)
+  2026-10-23_Spike-Run-x86_64-ci_v2.log
+        workflow run 39978524946, job 120499396561, workflow_dispatch repeat 1
+  2026-10-23_Spike-Run-x86_64-ci_v3.log
+        workflow run 39978945843, job 120500841447, workflow_dispatch repeat 2
+  2026-10-23_Spike-Run-x86_64-ci_v4.log
+        workflow run 39979315321, job 120502105080, workflow_dispatch repeat 3
+        (7m47s against about 2m30s for the others: it overlapped two image
+        builds on the shared runner pool, which is also the flattest test of the
+        latency numbers - every scenario line is still identical)
+  Artifact name on every run: kernel-spike-x86-64-logs (spike-run.log,
+  deps.log, serial.log, qemu.log). Workflow:
+  .github/workflows/kernel-spike.yml at commit 3f7c091.
+
+The runs are identical in every PASS/FAIL, RESULT, DESC and RACE line; only the
+latency numbers differ between runs, as expected. Verified by diffing the four
+transcripts after replacing process ids, temp directory names and every numeric
+timing field with placeholders: no other difference appears.

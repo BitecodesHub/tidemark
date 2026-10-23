@@ -1,6 +1,6 @@
 # AgentOS Tidemark Image Pipeline (v1, 2026-10-16)
 
-- **Status:** Phase 0 draft, revised on 2026-10-16 after review. No workflow in this document has run yet, because the GitHub repository does not exist. Every statement about CI behaviour is a design intent until the first green run is linked here.
+- **Status:** Phase 0 draft, revised on 2026-10-16 after review and on 2026-10-23 after the first green runs (section 6.6). Statements about CI behaviour are backed by observed runs where section 6.6 says so; the publish and signing steps are design intent and have deliberately never run (decision PD-17).
 - **Phase:** 0 (weeks 1 to 3, 19 October to 8 November 2026), checklist items E1 to E4, T1, T2, P1, P2 and acceptance criterion AC6.
 - **Owner:** Founder (reviews every change to the workflows and the self-test).
 - **Related records:** `docs/adr/2026-10-16_BaseImage_v1.md` (authoritative base-image decision), `docs/2026-10-16_Phase0-Checklist_v1.md`, `docs/research/2026-10-16_Tidemark-Concept_v1.md` (layer L0 and L8).
@@ -8,11 +8,11 @@
 ## Executive summary
 
 - The image is `quay.io/fedora/fedora-bootc:45`, pinned by digest, plus two Phase 0 units: a first-boot banner and a boot self-test. It contains **no Tidemark enforcement**: no labels, no gateway, no broker, no staging and no receipts. A Fedora 44 fallback is built the same way.
-- One run of `build-image.yml` carries each image from build to publication. It builds each x86_64 variant once, saves it as an OCI archive, scans that archive with no registry credentials, and boots that same archive twice through the reusable `boot-test.yml`. On `main`, and only after both builds and both boot tests pass, it pushes that same archive unchanged, signs it, verifies the signature and attaches a signed SBOM.
-- Both the Fedora 45 image (`:main`) and the Fedora 44 fallback (`:main-f44`) are pushed, signed and verified, as checklist items E2 and T1 require.
+- One run of `build-image.yml` carries each image from build to publication. It builds each x86_64 variant once, saves it as an OCI archive, scans that archive with no registry credentials, and boots that same archive twice through the reusable `boot-test.yml`. On `main`, and only after both builds and both boot tests pass **and the `PUBLISH_IMAGES` variable is set to `push`**, it pushes that same archive unchanged, signs it, verifies the signature and attaches a signed SBOM. The build, scan and boot halves ran green on 2026-10-23 (section 6.6); the publish half is switched off by decision (PD-17).
+- Both the Fedora 45 image (`:main`) and the Fedora 44 fallback (`:main-f44`) are pushed, signed and verified when publication is enabled, as checklist items E2 and T1 require; both build and the Fedora 45 one boots green today.
 - **Pinning:** actions are pinned by commit SHA and container images by digest; actionlint and the Python wheels are pinned by SHA-256. Not pinned: the Ubuntu packages (QEMU, OVMF, and podman on arm64), the trivy vulnerability database, and the lychee binary that lychee-action downloads.
-- The self-test now requires BTF, the three kfunc names and a Linux 7.2 floor (the recommended answer to checklist decision FD-G, pending the founder's confirmation).
-- Still open: checklist items E3 and T2 need the kernel probe to run inside the booted image (section 6.2).
+- The self-test requires BTF, the two kfunc names the labeller now uses (`bpf_get_file_xattr`, `bpf_path_d_path` - `bpf_real_data_inode` went out with decision PD-1) and a Linux 7.2 floor, which PD-2 confirmed as the v0.1 policy choice.
+- Still open: checklist items E3 and T2 need the kernel probe to run inside the booted image (section 6.2); that is D2, deferred to Phase 1 week 4 by PD-6, so both stay unchecked rather than being redefined.
 
 ## 1. Scope and what is not claimed
 
@@ -41,14 +41,16 @@ The Go module path and the documentation URLs in the unit files were placeholder
 
 ## 3. Base image pinning
 
-Resolved on 2026-10-16 at about 16:16 UTC through `https://quay.io/api/v1/repository/fedora/fedora-bootc/tag/?specificTag=<tag>` and the quay.io registry v2 manifest API.
+The pins below were resolved on 2026-10-23 at about 15:20 UTC through the Docker Registry v2 API (`GET /v2/fedora/fedora-bootc/manifests/<tag>`), after the 2026-10-16 pins became unretrievable (decisions ADR PD-14; `docs/adr/2026-10-16_BaseImage_v1.md` holds the re-pin record).
 
 | Tag | Pinned index digest | amd64 child | arm64 child | Version | amd64 kernel |
 |---|---|---|---|---|---|
-| 45 | `sha256:86cc9d98ef210b71a6c4eeec4b7d04e7fef0a4415184c2322a14c879df189f45` | `sha256:4e5c285a…ffe533c` | `sha256:78d94543…9a1ed4` | 45.20261016.0 | 7.2.9-300.fc45 |
-| 44 | `sha256:9db34195bc0b6be43e17c20ca840be5bc153093c94b62f6792a76fb199eeaced` | `sha256:f2d97f1e…0136bc` | `sha256:3588110b…c0287` | 44.20261016.0 | 7.2.10-200.fc44 |
+| 45 | `sha256:4c71411136f85da97cfc43d55291e13eec8cb2b2ff25ddf5ff5709ed093929da` | `sha256:a6492cc5…27de8a` | `sha256:7114b0bd…29de9e` | 45.20261023.0 | 7.2.11-300.fc45 |
+| 44 | `sha256:03808453feb5369ed6b074421117b56734f3a6dff8e25d9e0ddff0e48e4d6d2e` | `sha256:6696735d…12451d` | `sha256:f63e5f72…4658ee` | 44.20261023.0 | 7.2.11-200.fc44 |
 
-Both indexes also list ppc64le and s390x children, which Tidemark does not build. The tags are rebuilt daily, so the digest is the identity. Renovate proposes one grouped digest refresh per week. Each refresh runs both builds and both boot tests before a human merges it. Renovate keeps `Containerfile` on tag 45 and `Containerfile.f44` on tag 44; a move to Fedora 46 needs a new base-image ADR.
+Superseded, resolved 2026-10-16 at about 16:16 UTC, both answered `manifest unknown` on 2026-10-23: tag 45 `sha256:86cc9d98…df189f45` and tag 44 `sha256:9db34195…9eeaced`.
+
+Both indexes also list ppc64le and s390x children, which Tidemark does not build. The tags are rebuilt daily, so the digest is the identity - and, as of PD-14, an identity that the registry may eventually stop serving. `build-image.yml` therefore runs `.github/actions/check-base-digest` before each build: it asks the registry for the tag's current digest and probes the pinned one, fails with the current digest named when the pin is gone, and records a notice when the pin is reachable but older. It never rewrites a pin. Renovate proposes one grouped digest refresh per week. Each refresh runs both builds and both boot tests before a human merges it. Renovate keeps `Containerfile` on tag 45 and `Containerfile.f44` on tag 44; a move to Fedora 46 needs a new base-image ADR.
 
 ## 4. Image contents (Phase 0)
 
@@ -106,7 +108,8 @@ The probes run in a private `run.XXXXXX` directory, created with `mktemp` under 
 | `detect image changes (build-image)` | ubuntu-24.04 | all | `contents: read` | Yes |
 | `build (x86_64, fedora-45)`, `build (x86_64, fedora-44)` | ubuntu-24.04 | all | `contents: read` | Yes |
 | `boot test (fedora-45)`, `boot test (fedora-44)` (reusable `boot-test.yml`) | ubuntu-24.04 | all | `contents: read` | Yes |
-| `sign and publish (x86_64, fedora-45)`, `sign and publish (x86_64, fedora-44)` | ubuntu-24.04 | push to `main`, manual run on `main` | `packages: write`, `id-token: write` only | Yes |
+| `sign and publish (x86_64, fedora-45)`, `sign and publish (x86_64, fedora-44)` | ubuntu-24.04 | push to `main` or manual run on `main`, **and** `boot-test` succeeded, **and** the repository variable `PUBLISH_IMAGES` equals `push` | `packages: write`, `id-token: write` only | Yes when enabled; **off by default** (PD-17) |
+| `record the publish decision` | ubuntu-24.04 | every run with image changes | `contents: read` | No (`always()`, reports only) |
 | `build (aarch64, non-gating)` | ubuntu-24.04-arm | all | `contents: read` | No (`continue-on-error`) |
 
 Triggers: pull requests (always started, so that required checks report), pushes to `main` that touch `image/` or either workflow file, a weekly schedule (Monday 04:17 UTC) and manual runs. On pull requests, the change-detection job compares the pull request with its base. The image jobs are skipped (which GitHub counts as passing) when nothing under `image/`, `build-image.yml` or `boot-test.yml` changed. If the diff cannot be computed, the image jobs run. Scheduled runs build and boot-test but never publish; they exist to notice changes in the runner image, QEMU or OVMF.
@@ -119,7 +122,7 @@ Triggers: pull requests (always started, so that required checks report), pushes
 4. Runs trivy 0.75.0 from its digest-pinned image with `--exit-code 0` and no credentials. Trivy failures and a missing or empty report become `::warning::` annotations and never fail the job.
 5. Uploads the archive and image ID as `tidemark-image-<variant>` (one-day retention), and the SBOM and trivy reports as `tidemark-reports-<variant>` (30 days).
 
-**Publish job (one per variant, `main` only, after every build and boot-test job passes).**
+**Publish job (one per variant, `main` only, after every build and boot-test job passes, and only while `PUBLISH_IMAGES` is `push`).** This job has never run: publication was switched off on 2026-10-23 the day the pipeline first went green (decision PD-17), because step 4 writes a public, permanent entry to the Sigstore transparency log naming this repository - an irreversible action for a private, unlaunched project. Steps 1 to 7 below are the design, not a record of a successful run.
 
 1. Downloads the boot-tested archive and the SBOM. `download-artifact` fails on a digest mismatch by default.
 2. Pushes the archive with `skopeo copy --preserve-digests` to `ghcr.io/<owner>/tidemark:main` (Fedora 45) or `:main-f44` (Fedora 44). `--preserve-digests` refuses any manifest change, so the pushed digest is the archive's own manifest digest.
@@ -129,7 +132,7 @@ Triggers: pull requests (always started, so that required checks report), pushes
 6. Attaches the SBOM with `cosign attest --type spdxjson` and verifies it with `cosign verify-attestation`.
 7. Uploads the verification output as `tidemark-signing-<variant>`.
 
-**Deviation to confirm.** The Fedora 44 fallback was non-gating in the first draft. It now gates on pull requests and on `main`, because E2 and T1 require both builds to be signed and verified. If the fallback breaks, it blocks publishing of the Fedora 45 image as well, because a job that needs a matrix job waits for every leg of it. If the founder prefers a non-gating fallback, remove it from the three matrices and amend E2 and T1.
+**Deviation, decided 2026-10-23.** The Fedora 44 fallback was non-gating in the first draft. It now gates on pull requests and on `main`, because E2 and T1 require both builds to be signed and verified; if the fallback breaks, it blocks publishing the Fedora 45 image too, since a job that needs a matrix job waits for every leg of it. Under the founder's delegation the gating reading is kept - E2 names both images, and loosening it to make a pipeline comfortable would be narrowing the criterion. Both fallback builds have in fact passed.
 
 ### 6.2 boot-test.yml (reusable)
 
@@ -188,6 +191,24 @@ OpenSSF Scorecard v2.5.0 runs weekly, on pushes to `main` and on branch-protecti
 - syft v1.54.1 replaces v1.54.0 because it updates the RPM database reader (`go-rpmdb` 0.2.0 to 0.2.2), which matters for a Fedora image.
 - `codeql-action` v4.39.0 (released 2026-10-15) and `trivy` 0.76.0 (2026-10-14) were skipped deliberately, because they were one and two days old.
 - Renovate applies a 7-day cooldown to GitHub Actions only. Container images get a weekly schedule and human review instead (section 9).
+
+### 6.6 What actually ran (2026-10-23)
+
+Run [39978024733](https://github.com/BitecodesHub/tidemark/actions/runs/39978024733), a push to `main` touching `image/` and the workflows, on the re-pinned base digests from section 3:
+
+| Job | Result | Wall time |
+|---|---|---|
+| `detect image changes` | success | 5 s |
+| `build (x86_64, fedora-45)` | success | 5 m 56 s |
+| `build (x86_64, fedora-44)` | success | 5 m 55 s |
+| `build (aarch64, non-gating)` | success | 1 m 49 s |
+| `boot test (fedora-45)` | success | 9 m 55 s |
+| `boot test (fedora-44)` | cancelled by hand, mid-boot | - |
+| `sign and publish` | cancelled by hand, never started | - |
+
+The build jobs produced `tidemark-image-fedora-45` (1,060,348,755 bytes) and `-fedora-44` (1,050,830,675) archives plus `tidemark-reports-*` SBOM and trivy bundles (2,647,605 and 2,693,706 bytes). The Fedora 45 boot test booted the built archive twice with no network and a serial console and got `TIDEMARK_SELFTEST v=1 result=PASS phase=0 failed=none` on both boots - `uptime_s=10.40` on the first, `9.09` on the second, kernel `7.2.11-300.fc45.x86_64`, `landlock_abi=10`, LSM list `lockdown,capability,yama,selinux,bpf,landlock,ipe,ima,evm`, `kfunc_bpf_get_file_xattr=ok`, `kfunc_bpf_path_d_path=ok`, `selinux=enforcing` - with `multi-user.target` about 11 seconds into the first boot's serial log. The logs are the artifact `tidemark-boot-test-serial-logs-fedora-45` (sha256 `25c0e902e4a10b5ef045c4a6ddd5f9e01e79ffb992ae7bc7905221a16ff0ff4d`).
+
+Why the run was cancelled rather than left to finish: at that moment the publish job had become reachable, and its first irreversible action is a keyless cosign signature, which writes a public Sigstore transparency-log entry naming this repository and both digests. Publication is now opt-in (PD-17), the publish job also requires an explicit successful boot-test result, and the `record the publish decision` job states in every image run which of the five conditions did or did not hold. The Fedora 44 boot test is the one piece of this table that has never been observed green; it is owed on the next image-path run.
 
 ## 7. Verifying the published image
 

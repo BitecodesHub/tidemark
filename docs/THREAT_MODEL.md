@@ -166,7 +166,7 @@ kernel is not compromised.
 |---|---|---|---|---|---|---|
 | **G1 Containment** | Every descendant stays in the session cgroup subtree, network namespace and mount view, and is killed on stop. No namespace creation (user namespaces included), no io_uring. | systemd transient unit, cgroup v2 `Delegate=no`, `RestrictNamespaces=yes`, seccomp | Full | Doctor-reported (depends on systemd and cgroup v2 config) | None | Designed; not implemented (Phase 1) |
 | **G2 Single exit** | A session has no network path except `tidemark-gw` and `tidemark-broker`. DNS, UDP, QUIC, IP literals and machine-local Unix sockets are unavailable. Clearance is evaluated on the requested hostname before any DNS query; a hostname outside the session's current clearance is never resolved. | Private network namespace (loopback only), per-session sockets, Landlock `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, gateway-side resolution after the clearance check | Full | Doctor-reported | None | Designed; not implemented (Phase 1; gateway rule in Phase 2) |
-| **G3 Label before read** | The session label rises before the call returns when any session process opens a labelled file (by xattr or directory rule) or receives a descriptor to one. Reading from a private-source destination raises the label before the first response byte reaches the session. Descriptors are not inherited across the shim exec. A session cannot lower any label. | Sleepable BPF LSM on `file_open` and `file_receive`; `bpf_get_file_xattr`; `bpf_path_d_path`; **no inode-keyed label cache** - the label is recomputed on every readable open (labeller ADR as revised by decisions ADR PD-1, 2026-10-23; the aarch64 spike measured that removing an attribute leaves a cached label raised, which is why the cache was dropped) | Full (kernel 7.2.x pinned, kfuncs asserted at boot) | Doctor-reported. The v0.1 floor is Linux 7.2 (labeller ADR; decisions ADR PD-2). The floor is now a policy choice, not a kfunc dependency: `bpf_real_data_inode` is unused, so doctor checks only the kfuncs the labeller calls. Support for 7.1 kernels stays deferred (Section 10.1) because Phase 0 has no evidence on 7.1 | None | Designed; not implemented (Phase 1). Kernel assumptions tested by the Phase 0 spike (Section 10); aarch64 16/16 on 2026-10-23, x86_64 pending CI |
+| **G3 Label before read** | The session label rises before the call returns when any session process opens a labelled file (by xattr or directory rule) or receives a descriptor to one. Reading from a private-source destination raises the label before the first response byte reaches the session. Descriptors are not inherited across the shim exec. A session cannot lower any label. | Sleepable BPF LSM on `file_open` and `file_receive`; `bpf_get_file_xattr`; `bpf_path_d_path`; **no inode-keyed label cache** - the label is recomputed on every readable open (labeller ADR as revised by decisions ADR PD-1, 2026-10-23; the spike measured on both architectures that removing an attribute leaves a cached label raised, which is why the cache was dropped) | Full (kernel 7.2.x pinned, kfuncs asserted at boot) | Doctor-reported. The v0.1 floor is Linux 7.2 (labeller ADR; decisions ADR PD-2). The floor is now a policy choice, not a kfunc dependency: `bpf_real_data_inode` is unused, so doctor checks only the kfuncs the labeller calls. Support for 7.1 kernels stays deferred (Section 10.1) because Phase 0 has no evidence on 7.1 | None | Designed; not implemented (Phase 1). Kernel assumptions tested by the Phase 0 spike (Section 10); 16 of 16 on aarch64 in three identical runs and 16 of 16 on x86_64 in four, on 2026-10-23 |
 | **G4 Clearance on every chunk** | Gateway and broker forward bytes only while the session label is a subset of the destination clearance at that moment. Connections opened earlier are reset when the label rises. The decision never depends on content. | Per-chunk atomic load of the mmapped label word; tunnel reset on change events; plain HTTP re-checked per request; broker checks after reading the full body | Full | Doctor-reported (requires G3 functioning) | None | Designed; not implemented (Phase 2) |
 | **G5 Model channel** | A labelled session request is never placed on a backend outside its clearance; it fails closed with a structured reason. Fields outside the allowlist and provider-side tools are dropped for labelled sessions. Model API keys never enter a session. | `tidemark-broker` placement by clearance filter then static preference; field and tool allowlist; keys as systemd credentials with placeholders | Full | Doctor-reported | None | Designed; not implemented (Phase 2) |
 | **G6 Staged writes carry labels** | Writes stay unmerged and invisible to other sessions until commit; root and the human can inspect them with `tidemark diff`. Commit stamps every written file with the session final label. Abort restores a byte-identical workspace. Auto-exec, skill and hook files wait for human acceptance. Agent memory written by a labelled session is visible only to sessions started at or above that label. | overlayfs per-session upper; `tidemark diff`/`commit`/`accept`/`abort` from outside the slice; label-partitioned state views | Full | Doctor-reported (requires overlay on every writable path; doctor refuses otherwise) | None | Designed; not implemented (Phase 3) |
@@ -351,6 +351,13 @@ assumption fails, the labeller ADR must document the fanotify fallback and its
 coverage gaps (mmap, grandchild and overlay reads) before the fallback may be
 selected, per kill criterion 1.
 
+**Status 2026-10-23: both environments named above have run the 16-scenario
+suite - aarch64 in three consecutive Lima runs, x86_64 in four consecutive
+GitHub Actions QEMU/KVM runs - and no gated assumption failed on either. The
+`TM_DISABLE_INODE_CACHE=1` no-cache run below is so far aarch64-only. Evidence:
+`docs/spike-results/2026-10-23_Kernel-Spike-Results-aarch64_v2.md` and
+`2026-10-23_Kernel-Spike-Results-x86_64_v1.md`.**
+
 ### 10.1 Facts verified against kernel sources (16 October 2026)
 
 These were read from the `torvalds/linux` tree, so the spike confirms behaviour,
@@ -490,7 +497,10 @@ time.
   kernel `7.2.9-300.fc45`), via the quay.io API. The fallback `:44` was observed
   at `sha256:9db34195bc0b6be43e17c20ca840be5bc153093c94b62f6792a76fb199eeaced`
   (kernel `7.2.10-200.fc44`). The authoritative record of the pinned digest is
-  `docs/adr/2026-10-16_BaseImage_v1.md`.
+  `docs/adr/2026-10-16_BaseImage_v1.md`. **Both of those 16 October observations
+  are now historical: the registry stopped serving them and the pins were
+  refreshed on 2026-10-23 (decisions ADR PD-14), which is why this document
+  treats a digest as an observation with a date rather than a promise.**
 - **Fedora 45 kernel (observation).** Stable `kernel-7.2.9-300.fc45` (stable
   since 6 October 2026), `kernel-7.2.10-300.fc45` in testing and
   `kernel-7.2.11-300.fc45` pending, observed in Bodhi on 16 October 2026 (UTC).
@@ -515,6 +525,7 @@ time.
 | 2026-10-17 | v0 draft (consistency pass) | Aligned the G3 host column, the G3 mechanism, Section 7, S6 and Section 10.1 with the labeller ADR (proposed 7.2 floor, no-cache baseline, 7.1 support deferred); updated the path-hash limitation to the HMAC fields now in the receipt draft. |
 | 2026-10-17 | v0 draft (spike alignment) | Corrected the S2 test (nesting below the session does not change the level-2 ancestor; the move-out step now matches checklist AC3); added the coverage of Section 10.2 by the 11 spike scenarios, following `spike/README.md`. |
 | 2026-10-23 | v0 draft (decisions and 16-scenario spike) | Applied the Phase 0 founder decisions ADR: G3, Section 7, S1, S6 and Section 10.1 now state that the labeller keeps no inode-keyed cache (PD-1) and that the 7.2 floor is a policy choice rather than a `bpf_real_data_inode` dependency (PD-2); S2, S7 and the coverage paragraph record the scenarios that now test move-out, the 10,000-iteration race in both readings, and attribute removal; A4c's aliasing question is closed by PD-4 (location, with link/rename denied out of a ruled root); spike scenario count 12 to 16. |
+| 2026-10-23 | v0 draft (x86_64 spike) | Section 10 gains its status line: the x86_64 CI run passes 16 of 16 in four runs, so G3's kernel assumptions now hold on both architectures (the `TM_DISABLE_INODE_CACHE=1` run stays aarch64-only), and G3's cache-defect note is now a both-architecture measurement. |
 
 ---
 

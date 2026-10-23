@@ -1,15 +1,19 @@
 # Read-time labels via sleepable BPF LSM, with a fanotify fallback
 
 - **Status:** Proposed (Phase 0 draft, revised 2026-10-16 after review,
-  2026-10-17 in a cross-file consistency pass, and 2026-10-23 after the aarch64
-  spike). The aarch64 half of the kill test passes 16 of 16 in three runs; the
-  x86_64 half runs in CI. The lookup method is now decided (no cache), so the
+  2026-10-17 in a cross-file consistency pass, and 2026-10-23 after the spike
+  runs on both architectures). The aarch64 half of the kill test passes 16 of 16
+  in three runs and the x86_64 half passes 16 of 16 in four CI runs the same
+  day. The lookup method is now decided (no cache), so the
   C2 gate that held this ADR open is closed on the evidence in
-  [../spike-results/2026-10-23_Kernel-Spike-Results-aarch64_v2.md](../spike-results/2026-10-23_Kernel-Spike-Results-aarch64_v2.md);
+  [../spike-results/2026-10-23_Kernel-Spike-Results-aarch64_v2.md](../spike-results/2026-10-23_Kernel-Spike-Results-aarch64_v2.md)
+  and
+  [../spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md](../spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md);
   the decisions are recorded in
   [2026-10-23_Phase0-Founder-Decisions_v1.md](2026-10-23_Phase0-Founder-Decisions_v1.md).
-  The kernel-label claim is still dropped if the kill test fails on either
-  architecture.
+  The ADR stays Proposed because the founder has not reviewed and promoted it,
+  not because evidence is missing. The kernel-label claim is still dropped if
+  the kill test fails on either architecture.
 - **Date:** 2026-10-16
 - **Phase:** 0 (Foundations and kill gate)
 - **Deciders:** Founder; the 2026-10-23 revision records decisions made under
