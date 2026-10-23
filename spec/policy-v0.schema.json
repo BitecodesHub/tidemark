@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentos-tidemark.example/spec/policy-v0.schema.json",
+  "title": "AgentOS Tidemark policy v0",
+  "description": "Phase 0 draft schema for the Tidemark policy file, revised 2026-10-16 after review. Status: DRAFT, not implemented. This schema defines the label lattice, file-label sources, egress destinations, model backends, profile references and the enforcement mode. No component reads this file yet. Rules that JSON Schema cannot express are listed under x-loader-checks; the policy loader must enforce them, and that loader does not exist yet. The $id host is a placeholder and changes when the real repository and specification home are created. Semantics are defined in spec/clearance-model.md.",
+  "x-loader-checks": [
+    "Every label name used in a labelSet is declared in lattice.labels.",
+    "Label names and label bits are each unique within lattice.labels.",
+    "Destination names, backend names and profile names are each unique.",
+    "The same host pattern does not appear in two destinations. When an exact host and a wildcard host from different destinations both match a name, the exact host wins; between two wildcards, the longer suffix wins.",
+    "A home-relative directory rule, once expanded over every home directory, yields an absolute prefix of at most 255 bytes.",
+    "Every expanded directory-rule prefix is a canonical path: no component is a symbolic link (on Fedora bootc, /home/x is written /var/home/x).",
+    "A warning is emitted when a destination's source_label is not a subset of its clearance, because the first response then denies every later request chunk to the same destination.",
+    "The bit assigned to a label is never reused for a different name while any file may still carry it in its security.bpf.tidemark attribute."
+  ],
+  "type": "object",
+  "required": ["schema_version", "lattice", "enforcement", "file_labels", "destinations", "backends"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "Policy schema version. v0 is a Phase 0 draft with no stability guarantee.",
+      "const": "v0"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Non-authoritative descriptive fields. Ignored by enforcement.",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "updated": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Last edit date, YYYY-MM-DD."
+        }
+      }
+    },
+    "enforcement": {
+      "description": "How the exits act on a label-versus-clearance decision. enforce: the gateway stops forwarding and resets uncovered tunnels, and the broker fails closed when no cleared backend fits. audit: the exits forward bytes the rule would deny, record decision audit_allow in the receipt, never reset tunnels, and therefore provide no confidentiality; labels are still raised and recorded. See spec/clearance-model.md section 3.2. The concept's week-9 label-creep kill criterion may switch the shipped default to audit.",
+      "type": "string",
+      "enum": ["audit", "enforce"]
+    },
+    "lattice": {
+      "description": "The confidentiality label lattice. A label VALUE is a set of label names. A is lower than or equal to B when A is a subset of B. The empty set {} is the bottom element: it means unlabelled, and 'public' is the reserved display name for it. A clearance is an upper bound on what a destination may receive; it cannot require a label. The join of two values is their union, which is how the session high-water mark rises. Each declared name is assigned one bit of the 64-bit kernel label word.",
+      "type": "object",
+      "required": ["labels"],
+      "additionalProperties": false,
+      "properties": {
+        "labels": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "description": "The declared labels, each with a stable bit position in the 64-bit kernel label word. MUST include private and secret. The name public is reserved for the empty set and cannot be declared. Uniqueness of names and bits is a loader check.",
+          "items": { "$ref": "#/$defs/labelDecl" },
+          "allOf": [
+            { "contains": { "type": "object", "required": ["name"], "properties": { "name": { "const": "private" } } } },
+            { "contains": { "type": "object", "required": ["name"], "properties": { "name": { "const": "secret" } } } }
+          ]
+        }
+      }
+    },
+    "file_labels": {
+      "description": "How a file acquires a label. A file's label is the union of its own security.bpf.tidemark extended attribute and the label of every directory rule that matches its session-visible path. Setting any security.bpf.* attribute requires CAP_SYS_ADMIN, which sessions do not hold. A label is captured when a file is opened or a descriptor is received; later changes do not reach descriptors that are already open (spec/clearance-model.md section 4).",
+      "type": "object",
+      "required": ["xattr_name", "directory_rules"],
+      "additionalProperties": false,
+      "properties": {
+        "xattr_name": {
+          "description": "The extended-attribute name read by the kernel label program. Fixed in v0. Proposed value format: the label as a 64-bit little-endian bitmask using the bits declared in lattice.labels. The Phase 0 spike uses a one-byte stand-in format; the production format is fixed in Phase 1.",
+          "const": "security.bpf.tidemark"
+        },
+        "directory_rules": {
+          "description": "Path-prefix rules. Prefixes are matched against the session-visible path of the overlay-level file_open: bpf_path_d_path relative to the session root. The backing-file open that overlayfs performs internally is never rule-matched, because its path is relative to a cloned private layer mount; it is used, if at all, only for the extended-attribute read and a cache key. This works because writable overlays are bound at the same absolute path as their lower directory, read paths are bound at their own paths, and sessions do not use RootDirectory=. A prefix matches when the path equals it or continues it with '/'; '/var/home/a/Private' therefore does not match '/var/home/a/PrivateX'. A trailing ' (deleted)' that d_path appends to unlinked files is removed before matching. When several rules match, their labels are unioned. Directory rules keep default sensitive folders labelled even when an editor or other tool drops the extended attribute, but only while the file stays under the rule's path.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/directoryRule" }
+        }
+      }
+    },
+    "destinations": {
+      "description": "Network exits mediated by the gateway. A session may send bytes to a destination only while the session's current label value is a subset of the destination's clearance, re-checked before every forwarded chunk. A destination may also carry a source label, which the gateway raises on the session before it relays the first response byte.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/destination" }
+    },
+    "backends": {
+      "description": "Model backends reachable through the broker. The broker treats a model call as an exit: it places a request only on a backend whose clearance covers the session's current label value, applying the declared backends in array order as a static preference, and fails closed when none fits (in enforce mode). The broker is the only holder of backend API keys.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/backend" }
+    },
+    "profiles": {
+      "description": "References to agent profile files (for example Hermes Agent and OpenCode). Profiles are defined in their own files under profiles/, which arrive in Phase 1, and are only referenced here by name and path.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/profileRef" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "description": "A short lower-case identifier used in receipts and denial messages.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "maxLength": 64
+    },
+    "labelName": {
+      "description": "A single label name. Lower-case, starts with a letter, may contain letters, digits, underscores and hyphens. The name public is reserved for the empty set and is rejected.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 64,
+      "not": { "const": "public" }
+    },
+    "labelDecl": {
+      "description": "A declared label and its bit position in the kernel label word.",
+      "type": "object",
+      "required": ["name", "bit"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/labelName" },
+        "bit": {
+          "description": "Bit index in the 64-bit label word. Stable for the life of an installation, because file attributes store bits, not names.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "comment": { "type": "string" }
+      }
+    },
+    "labelSet": {
+      "description": "A label value: a set of declared label names, represented as an array with no duplicates. An empty array is the bottom value {} (unlabelled, displayed as public).",
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/labelName" }
+    },
+    "directoryRule": {
+      "type": "object",
+      "required": ["prefix", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "prefix": {
+          "description": "The rule's path. When home_relative is false, an absolute canonical path such as /srv/private. When home_relative is true, a path relative to a home directory, such as .ssh, which tidemarkd expands into one absolute prefix per home directory (spec/clearance-model.md section 4, precondition P6). Empty, '.' and '..' components, repeated or trailing slashes, and the bare root '/' are rejected.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "not": { "pattern": "(^|/)\\.{1,2}(/|$)" }
+        },
+        "home_relative": {
+          "description": "true: prefix is relative to each home directory. tidemarkd expands it, at policy load and whenever the account database or a profile changes, over the canonical home directory of every account whose home lies under /var/home, the root home (/var/roothome on Fedora bootc), and every agent profile's home. The expansion set is fixed with the agent-home convention in Phase 1.",
+          "type": "boolean",
+          "default": false
+        },
+        "label": {
+          "description": "The label set applied to matching files. Must not be empty.",
+          "$ref": "#/$defs/labelSet",
+          "minItems": 1
+        },
+        "comment": { "type": "string" }
+      },
+      "if": {
+        "required": ["home_relative"],
+        "properties": { "home_relative": { "const": true } }
+      },
+      "then": {
+        "properties": { "prefix": { "pattern": "^[^/]+(/[^/]+)*$" } }
+      },
+      "else": {
+        "properties": { "prefix": { "pattern": "^(/[^/]+)+$" } }
+      }
+    },
+    "hostPattern": {
+      "description": "A lower-case DNS host name, or a pattern with one leading '*.' label. '*.example.com' matches any name with one or more labels before example.com (a.example.com and a.b.example.com) and never the apex example.com, which must be listed separately. IP literals are refused by the gateway and rejected here. v0 decides per host name and does not inspect content.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$",
+      "not": { "pattern": "^(\\*\\.)?[0-9.]+$" }
+    },
+    "destination": {
+      "type": "object",
+      "required": ["name", "hosts", "clearance"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "hosts": {
+          "description": "The host names or patterns this destination covers. The gateway resolves DNS itself after the clearance check.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/hostPattern" }
+        },
+        "ports": {
+          "description": "Allowed destination ports. When omitted, 443 is assumed. v0 expects HTTP and HTTPS only.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        },
+        "clearance": {
+          "description": "The destination's clearance: the upper bound on the label value it may receive. A session may send only while its current label value is a subset of this set. An empty set clears the destination for unlabelled data only.",
+          "$ref": "#/$defs/labelSet"
+        },
+        "source_label": {
+          "description": "An optional, non-empty label set that the gateway raises on the session, through tidemarkd's raise-only call, before it relays the first response byte from this destination. When omitted, receiving from this destination raises nothing.",
+          "$ref": "#/$defs/labelSet",
+          "minItems": 1
+        },
+        "comment": { "type": "string" }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "required": ["name", "kind", "endpoint", "clearance"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "A short identifier for this backend, used in receipts and placement decisions. The broker exposes the alias tidemark/auto to sessions, so names beginning with tidemark/ are reserved.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_/-]*$",
+          "maxLength": 64,
+          "not": { "pattern": "^tidemark/" }
+        },
+        "kind": {
+          "description": "local: a backend running inside the image, such as the llama-server Quadlet. host: an endpoint on the development host, such as macOS Metal or Ollama, reachable over the VM's host bridge and recorded as unattested. cloud: a remote provider.",
+          "type": "string",
+          "enum": ["local", "host", "cloud"]
+        },
+        "endpoint": {
+          "description": "The OpenAI Chat Completions base URL the broker dials. Keys are supplied to the broker as systemd credentials and never appear in this file. The pattern is a syntactic floor; format uri is an annotation only.",
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://[^\\s/?#@]+(/[^\\s?#]*)?$"
+        },
+        "clearance": {
+          "description": "The label set this backend is cleared to receive. A request is placed here only while the session's label value is a subset of this set. Cloud backends default to the empty set, consistent with the local-only privacy default.",
+          "$ref": "#/$defs/labelSet"
+        },
+        "digest_pinned": {
+          "description": "true only when the backend runs from the signed image with its model file pinned by SHA-256, so receipts can record both digests. This is NOT remote attestation; v0.1 has none. Host and cloud endpoints are recorded as unattested (false). Defaults to false.",
+          "type": "boolean",
+          "default": false
+        },
+        "comment": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "const": "cloud" } } },
+          "then": { "properties": { "endpoint": { "pattern": "^https://" } } }
+        },
+        {
+          "if": { "required": ["kind"], "properties": { "kind": { "enum": ["host", "cloud"] } } },
+          "then": { "properties": { "digest_pinned": { "const": false } } }
+        }
+      ]
+    },
+    "profileRef": {
+      "type": "object",
+      "required": ["name", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "path": {
+          "description": "Repository-relative path to the profile file.",
+          "type": "string",
+          "pattern": "^profiles/[a-z0-9][a-z0-9_-]*\\.ya?ml$"
+        }
+      }
+    }
+  }
+}

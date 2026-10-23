@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# AgentOS Tidemark first-boot unit. Status: Phase 0 draft (2026-10-16).
+#
+# Runs once: it prints the Phase 0 banner and runs the boot self-test, then
+# writes /var/lib/tidemark/firstboot.done. tidemark-selftest.service is
+# ordered before this unit and skips itself while the stamp is missing, so the
+# first boot prints exactly one self-test result line.
+# Documentation URL is a placeholder until the real repository exists.
+
+[Unit]
+Description=AgentOS Tidemark first-boot banner and self-test (Phase 0 draft)
+Documentation=https://github.com/BitecodesHub/tidemark/blob/main/docs/2026-10-16_Image-Pipeline_v1.md
+After=local-fs.target systemd-tmpfiles-setup.service tidemark-selftest.service
+ConditionPathExists=!/var/lib/tidemark/firstboot.done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/tidemark/tidemark-firstboot.sh
+StandardOutput=journal+console
+StandardError=journal+console
+StateDirectory=tidemark
+StateDirectoryMode=0700
+TimeoutStartSec=180
+# The self-test needs no network; a private network namespace makes that explicit.
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# AgentOS Tidemark: OpenSSF Scorecard supply-chain analysis.
+# Status: Phase 0 draft (2026-10-16). See docs/2026-10-16_Image-Pipeline_v1.md.
+#
+# Results go to the repository's code-scanning page (SARIF) and, because
+# publish_results is true, to the public Scorecard API and badge. Publishing
+# requires a public repository; on a private repository set publish_results to
+# false. Scorecard restricts which steps may run in this job when publishing,
+# so keep it to the steps below.
+#
+# Every third-party action is pinned by full commit SHA; the trailing comment
+# names the release tag.
+
+name: scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "29 5 * * 2"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      security-events: write # upload the SARIF file to code scanning
+      id-token: write # publish results to the Scorecard API
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload SARIF as an artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: results.sarif

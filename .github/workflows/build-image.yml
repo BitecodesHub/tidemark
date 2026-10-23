@@ -1,0 +1,443 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# AgentOS Tidemark: build, boot-test, sign and publish the bootc image.
+# Status: Phase 0 draft (2026-10-16, revised after review). Not yet run.
+# See docs/2026-10-16_Image-Pipeline_v1.md.
+#
+# One workflow run carries one image from build to publication:
+#   1. build      builds each x86_64 variant once (Fedora 45 main image and
+#                 Fedora 44 fallback), saves it as an OCI archive, generates a
+#                 syft SBOM and a trivy report from that archive with no
+#                 registry credentials, and uploads the archive as an artifact.
+#   2. boot-test  calls the reusable workflow boot-test.yml for each variant;
+#                 it boots that same archive under QEMU/KVM, twice.
+#   3. publish    on main only, after both builds and both boot tests pass:
+#                 pushes that same archive unchanged to ghcr.io/<owner>/tidemark
+#                 (owner lowercased), checks that the pushed config digest is
+#                 the boot-tested image ID, signs it keyless with cosign through
+#                 GitHub OIDC (Sigstore bundle and the legacy .sig tag), verifies
+#                 both signatures, attaches the SBOM as a signed attestation and
+#                 verifies it.
+# aarch64 is built natively but does not gate and is not published.
+#
+# Pull requests and the weekly schedule run steps 1 and 2 only; nothing is
+# pushed and no write token is issued. The workflow starts on every pull
+# request so that required checks always report; the image jobs are skipped
+# when nothing under image/ or the two workflow files changed.
+#
+# Every third-party action is pinned by full commit SHA; the trailing comment
+# names the release tag. SHAs were resolved with git ls-remote on 2026-10-16.
+# Container images used by steps are pinned by digest in the env block below.
+
+name: build-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "image/**"
+      - ".github/workflows/build-image.yml"
+      - ".github/workflows/boot-test.yml"
+  pull_request:
+  schedule:
+    # Weekly build and boot test, to notice changes in the runner image, QEMU
+    # or OVMF. Scheduled runs do not publish.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_NAME: tidemark
+  BUILD_CONTEXT: image
+  COSIGN_VERSION: v3.0.6
+  # Scanners run from digest-pinned container images instead of third-party
+  # actions, and only in the build job, which holds no write permissions.
+  SYFT_IMAGE: ghcr.io/anchore/syft:v1.54.1@sha256:3eb5379ba7b409c3f4069b686110527af0c47df993fa5c10d13e7cf34f49b1aa
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
+
+jobs:
+  changes:
+    name: detect image changes (build-image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.diff.outputs.image }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Decide whether the image inputs changed
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Pull requests run this workflow unconditionally so that required
+          # status checks always report; the jobs below are skipped (which
+          # counts as passing) when no image input changed. Other events are
+          # already filtered by path, scheduled or manual.
+          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
+            echo "image=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if ! changed="$(git diff --name-only "${BASE_SHA}" "${GITHUB_SHA}")"; then
+            echo "::warning::could not compute the pull request diff; running the image jobs"
+            echo "image=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if grep -E '^(image/|\.github/workflows/(build-image|boot-test)\.yml$)' <<< "${changed}"; then
+            echo "image=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "No image inputs changed; the image jobs are skipped."
+            echo "image=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+  build:
+    name: build (x86_64, ${{ matrix.variant }})
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: fedora-45
+            containerfile: Containerfile
+          - variant: fedora-44
+            containerfile: Containerfile.f44
+    env:
+      VARIANT: ${{ matrix.variant }}
+      CONTAINERFILE: ${{ matrix.containerfile }}
+      LOCAL_TAG: localhost/tidemark:${{ matrix.variant }}
+      # The boot-test workflow and the publish job rely on these two names.
+      ARCHIVE_NAME: tidemark-${{ matrix.variant }}.oci.tar
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Show tool versions
+        run: |
+          podman version
+          skopeo --version
+          uname -r
+
+      - name: Build image
+        run: |
+          sudo podman build \
+            --file "${BUILD_CONTEXT}/${CONTAINERFILE}" \
+            --tag "${LOCAL_TAG}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            "${BUILD_CONTEXT}"
+          sudo podman image inspect --format '{{.Architecture}} {{.Size}} bytes' "${LOCAL_TAG}"
+          sudo podman image inspect --format '{{json .Labels}}' "${LOCAL_TAG}"
+
+      - name: Save image as an OCI archive
+        run: |
+          out="${RUNNER_TEMP}/image"
+          mkdir -p "${out}"
+          sudo podman save --format oci-archive --output "${out}/${ARCHIVE_NAME}" "${LOCAL_TAG}"
+          sudo chown "$(id -u):$(id -g)" "${out}/${ARCHIVE_NAME}"
+          # The image ID is the config digest. The boot test and the publish
+          # job compare against it to prove they handle this exact image.
+          image_id="$(sudo podman image inspect --format '{{.Id}}' "${LOCAL_TAG}")"
+          printf '%s\n' "${image_id}" > "${out}/image-id"
+          echo "image ID (config digest): sha256:${image_id#sha256:}"
+          ls -l "${out}"
+
+      - name: Generate SBOM (syft, SPDX JSON, no network, no credentials)
+        run: |
+          layout="${RUNNER_TEMP}/oci-layout"
+          reports="${RUNNER_TEMP}/reports"
+          mkdir -p "${layout}" "${reports}"
+          # syft reads oci-dir: sources, and trivy --input reads an OCI layout
+          # directory or a docker-archive tar but not an oci-archive tar, so
+          # both scanners read the unpacked layout.
+          tar -xf "${RUNNER_TEMP}/image/${ARCHIVE_NAME}" -C "${layout}"
+          # Package-level SBOM only; per-file metadata for every RPM file
+          # would make the attestation very large.
+          sudo podman run --rm --network none \
+            -e SYFT_CHECK_FOR_APP_UPDATE=false \
+            -e SYFT_FILE_METADATA_SELECTION=none \
+            -v "${RUNNER_TEMP}:/work" \
+            "${SYFT_IMAGE}" \
+            scan oci-dir:/work/oci-layout \
+            --output spdx-json=/work/reports/sbom.spdx.json
+          sudo chown -R "$(id -u):$(id -g)" "${reports}"
+          test -s "${reports}/sbom.spdx.json"
+          ls -l "${reports}/sbom.spdx.json"
+
+      - name: Vulnerability report (trivy, report-only, no credentials)
+        run: |
+          reports="${RUNNER_TEMP}/reports"
+          mkdir -p "${RUNNER_TEMP}/trivy-cache"
+          # Report-only: trivy failures become warnings and never fail the job.
+          # The vulnerability database is downloaded at run time and is not
+          # pinned.
+          if ! sudo podman run --rm \
+            -v "${RUNNER_TEMP}:/work" \
+            -v "${RUNNER_TEMP}/trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" \
+            image --input /work/oci-layout --scanners vuln --exit-code 0 --no-progress \
+            --format json --output /work/reports/trivy.json; then
+            echo "::warning::trivy did not complete for ${VARIANT}"
+          fi
+          if sudo test -s "${reports}/trivy.json"; then
+            if ! sudo podman run --rm \
+              -v "${RUNNER_TEMP}:/work" \
+              "${TRIVY_IMAGE}" \
+              convert --format table --output /work/reports/trivy.txt /work/reports/trivy.json; then
+              echo "::warning::trivy could not convert the report for ${VARIANT}"
+            fi
+          else
+            echo "::warning::no vulnerability report for ${VARIANT}: trivy.json is missing or empty"
+          fi
+          sudo chown -R "$(id -u):$(id -g)" "${reports}"
+          sudo rm -rf "${RUNNER_TEMP}/oci-layout"
+
+      - name: Upload image archive (for the boot test and publish jobs)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tidemark-image-${{ matrix.variant }}
+          path: ${{ runner.temp }}/image/
+          if-no-files-found: error
+          retention-days: 1
+          # The archive layers are already gzip-compressed.
+          compression-level: 0
+
+      - name: Upload SBOM and vulnerability report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tidemark-reports-${{ matrix.variant }}
+          path: ${{ runner.temp }}/reports/
+          if-no-files-found: warn
+          retention-days: 30
+
+  boot-test:
+    name: boot test (${{ matrix.variant }})
+    needs: [changes, build]
+    if: needs.changes.outputs.image == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [fedora-45, fedora-44]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/boot-test.yml
+    with:
+      variant: ${{ matrix.variant }}
+
+  publish:
+    name: sign and publish (x86_64, ${{ matrix.variant }})
+    needs: [changes, build, boot-test]
+    if: >-
+      needs.changes.outputs.image == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # No checkout and no contents permission: this job only handles the
+    # artifacts that the build job produced and the boot test booted.
+    permissions:
+      packages: write # push to GHCR
+      id-token: write # keyless signing through GitHub OIDC
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: fedora-45
+            tag-suffix: ""
+          - variant: fedora-44
+            tag-suffix: "-f44"
+    env:
+      VARIANT: ${{ matrix.variant }}
+      TAG_SUFFIX: ${{ matrix.tag-suffix }}
+      ARCHIVE_NAME: tidemark-${{ matrix.variant }}.oci.tar
+    steps:
+      - name: Download the boot-tested image archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tidemark-image-${{ matrix.variant }}
+          path: ${{ runner.temp }}/image
+
+      - name: Download the SBOM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tidemark-reports-${{ matrix.variant }}
+          path: ${{ runner.temp }}/reports
+
+      - name: Set image repository (owner lowercased)
+        run: echo "IMAGE_REPO=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}" >> "${GITHUB_ENV}"
+
+      - name: Log in to GHCR
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${REGISTRY_PASSWORD}" | sudo skopeo login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Push the archive unchanged and record its digest
+        run: |
+          archive="${RUNNER_TEMP}/image/${ARCHIVE_NAME}"
+          expected_id="$(cat "${RUNNER_TEMP}/image/image-id")"
+          expected_id="sha256:${expected_id#sha256:}"
+          # --preserve-digests refuses any manifest change, so the pushed
+          # digest is the manifest digest of the boot-tested archive.
+          sudo skopeo copy --preserve-digests --digestfile "${RUNNER_TEMP}/digest" \
+            "oci-archive:${archive}" "docker://${IMAGE_REPO}:main${TAG_SUFFIX}"
+          digest="$(cat "${RUNNER_TEMP}/digest")"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::unexpected digest '${digest}'"
+            exit 1
+          fi
+          config_digest="$(sudo skopeo inspect --raw "docker://${IMAGE_REPO}@${digest}" | jq -r '.config.digest')"
+          if [[ "${config_digest}" != "${expected_id}" ]]; then
+            echo "::error::pushed config digest ${config_digest} is not the boot-tested image ID ${expected_id}"
+            exit 1
+          fi
+          echo "pushed ${IMAGE_REPO}@${digest} (config ${config_digest})"
+          # Add an immutable-by-convention commit tag without re-pushing layers.
+          sudo skopeo copy --preserve-digests \
+            "docker://${IMAGE_REPO}@${digest}" "docker://${IMAGE_REPO}:sha-${GITHUB_SHA}${TAG_SUFFIX}"
+          echo "IMAGE_DIGEST=${digest}" >> "${GITHUB_ENV}"
+          echo "IMAGE_REF=${IMAGE_REPO}@${digest}" >> "${GITHUB_ENV}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Log in to GHCR for cosign
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${REGISTRY_PASSWORD}" | cosign login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Sign image (keyless, GitHub OIDC; Sigstore bundle and legacy .sig tag)
+        run: |
+          # cosign v3 attaches a Sigstore bundle through the OCI referrers API
+          # by default. podman and bootc (containers/image) look only for the
+          # legacy sha256-<digest>.sig tag, so a second signature in the legacy
+          # format keeps a Phase 1 policy.json able to find it.
+          cosign sign --yes "${IMAGE_REF}"
+          cosign sign --yes --new-bundle-format=false --use-signing-config=false "${IMAGE_REF}"
+
+      - name: Verify both signatures
+        run: |
+          mkdir -p "${RUNNER_TEMP}/signing"
+          cosign verify \
+            --certificate-identity "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --certificate-oidc-issuer "${OIDC_ISSUER}" \
+            "${IMAGE_REF}" > "${RUNNER_TEMP}/signing/cosign-verify-bundle.json"
+          cosign verify --new-bundle-format=false \
+            --certificate-identity "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --certificate-oidc-issuer "${OIDC_ISSUER}" \
+            "${IMAGE_REF}" > "${RUNNER_TEMP}/signing/cosign-verify-legacy.json"
+          sig_tag="${IMAGE_REPO}:sha256-${IMAGE_DIGEST#sha256:}.sig"
+          if ! sudo skopeo inspect --raw "docker://${sig_tag}" > /dev/null; then
+            echo "::error::the legacy signature tag ${sig_tag} does not exist"
+            exit 1
+          fi
+          echo "cosign verify passed for ${IMAGE_REF} (bundle and legacy formats); ${sig_tag} exists"
+
+      - name: Attach SBOM as a signed attestation and verify it
+        run: |
+          ls -l "${RUNNER_TEMP}/reports/sbom.spdx.json"
+          cosign attest --yes --type spdxjson --predicate "${RUNNER_TEMP}/reports/sbom.spdx.json" "${IMAGE_REF}"
+          cosign verify-attestation --type spdxjson \
+            --certificate-identity "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
+            --certificate-oidc-issuer "${OIDC_ISSUER}" \
+            "${IMAGE_REF}" > /dev/null
+          echo "cosign verify-attestation passed for ${IMAGE_REF}"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## AgentOS Tidemark image, ${VARIANT} (Phase 0 draft)"
+            echo ""
+            echo "- Image: \`${IMAGE_REF:-not pushed}\`"
+            echo "- Tags: \`main${TAG_SUFFIX}\`, \`sha-${GITHUB_SHA}${TAG_SUFFIX}\`"
+            echo "- Signed by: \`${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}\`"
+            echo ""
+            echo "Verify:"
+            echo ""
+            echo '```'
+            echo "cosign verify --certificate-identity '${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}' \\"
+            echo "  --certificate-oidc-issuer '${OIDC_ISSUER}' '${IMAGE_REF:-<image>@<digest>}'"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload verification output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tidemark-signing-${{ matrix.variant }}
+          path: ${{ runner.temp }}/signing/
+          if-no-files-found: warn
+          retention-days: 30
+
+  build-aarch64:
+    name: build (aarch64, non-gating)
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    # Phase 0 builds aarch64 natively but does not gate on it or publish it.
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      LOCAL_TAG: localhost/tidemark:fedora-45-aarch64
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Ensure podman is available
+        run: |
+          if ! command -v podman >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends podman
+          fi
+          podman version
+
+      - name: Build image
+        run: |
+          sudo podman build \
+            --file "${BUILD_CONTEXT}/Containerfile" \
+            --tag "${LOCAL_TAG}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            "${BUILD_CONTEXT}"
+
+      - name: Check architecture
+        run: |
+          arch="$(sudo podman image inspect --format '{{.Architecture}}' "${LOCAL_TAG}")"
+          echo "image architecture: ${arch}"
+          test "${arch}" = "arm64"

@@ -1,0 +1,201 @@
+# AgentOS Tidemark default policy
+#
+# Status: PHASE 0 DRAFT, revised 2026-10-16 after review. Not implemented. No
+# component reads this file yet. It encodes the first-boot defaults described in
+# the concept document (docs/research/2026-10-16_Tidemark-Concept_v1.md) and
+# validates against spec/policy-v0.schema.json. The semantic loader checks that
+# the schema lists under x-loader-checks do not exist yet.
+#
+# Privacy posture: local-only by default. Private data stays on the machine.
+# Cloud providers are cleared for unlabelled data only. The image-local model
+# backend is cleared for every label, so a labelled session is never forced off
+# the machine to reach a model.
+#
+# Directory rules are home-relative: tidemarkd expands each rule over every home
+# directory (the human's and each agent's), so the human's own ~/.ssh is
+# labelled even when a profile binds it. The agent-home layout itself is a
+# separate founder decision, fixed in Phase 1.
+#
+# FOUNDER DECISIONS marked below: enforcement default, the mail compartment,
+# and the host-endpoint clearance.
+
+schema_version: v0
+
+metadata:
+  name: tidemark-default
+  description: >-
+    First-boot default labels, directory rules, destinations and model backends
+    for the v0.1 preview. Local-only privacy posture.
+  updated: "2026-10-16"
+
+# FOUNDER DECISION: enforce or audit as the shipped default. This draft ships
+# enforce, as the concept plans; audit provides no confidentiality (see
+# spec/clearance-model.md section 3.2). The week-9 label-creep kill criterion
+# switches the default to audit if more than 40% of benign sessions end
+# labelled.
+enforcement: enforce
+
+lattice:
+  labels:
+    - name: private
+      bit: 0
+      comment: Private documents and browser data.
+    - name: secret
+      bit: 1
+      comment: Credentials and key material.
+    - name: mail
+      bit: 2
+      comment: >-
+        Compartment for data read from the mail API. FOUNDER DECISION: a
+        separate compartment means a session that has read both the inbox and
+        ~/Private ({mail, private}) cannot send through the mail API.
+
+file_labels:
+  xattr_name: security.bpf.tidemark
+  directory_rules:
+    # Secrets. Opening any of these raises the session to include secret.
+    - prefix: .ssh
+      home_relative: true
+      label: [secret]
+      comment: SSH private keys, configuration and known_hosts.
+    - prefix: .gnupg
+      home_relative: true
+      label: [secret]
+      comment: GnuPG keyrings and trust database.
+    - prefix: .local/share/keyrings
+      home_relative: true
+      label: [secret]
+      comment: Secret Service and GNOME keyring stores.
+    - prefix: .password-store
+      home_relative: true
+      label: [secret]
+      comment: pass password-store entries.
+    - prefix: .config/gh/hosts.yml
+      home_relative: true
+      label: [secret]
+      comment: GitHub CLI token store.
+    - prefix: .aws
+      home_relative: true
+      label: [secret]
+      comment: AWS credential and configuration files.
+    - prefix: .config/gcloud
+      home_relative: true
+      label: [secret]
+      comment: Google Cloud credential files.
+    - prefix: .azure
+      home_relative: true
+      label: [secret]
+      comment: Azure credential files.
+    - prefix: .kube/config
+      home_relative: true
+      label: [secret]
+      comment: Kubernetes cluster credentials.
+    - prefix: .docker/config.json
+      home_relative: true
+      label: [secret]
+      comment: Container registry credentials.
+    - prefix: .netrc
+      home_relative: true
+      label: [secret]
+      comment: netrc credentials used by curl, git and others.
+    # Private data. Opening any of these raises the session to include private.
+    - prefix: Private
+      home_relative: true
+      label: [private]
+      comment: General private documents directory.
+    - prefix: .local/share/mail
+      home_relative: true
+      label: [private]
+      comment: >-
+        Local maildir and mbox stores. Kept at private, not mail, so a session
+        that read local mail cannot send through the mail API; relabelling to
+        mail is a founder decision.
+    - prefix: .thunderbird
+      home_relative: true
+      label: [private]
+      comment: Thunderbird mail profiles (same reasoning as local mail stores).
+    - prefix: .mozilla
+      home_relative: true
+      label: [private]
+      comment: Browser profiles, history and saved sessions.
+
+destinations:
+  # Public destinations: cleared for unlabelled data only (empty clearance).
+  # A session that has read anything labelled cannot send to these.
+  - name: public-paste
+    hosts: ["*.paste.example"]
+    ports: [443]
+    clearance: []
+    comment: Stand-in public paste host used by the benchmark and demo.
+  - name: public-search
+    hosts: ["*.search.example"]
+    ports: [443]
+    clearance: []
+    comment: Stand-in public search host used by the benchmark and demo.
+  - name: github
+    hosts: [github.com, "*.github.com"]
+    ports: [443]
+    clearance: []
+    comment: >-
+      GitHub over HTTPS, cleared for unlabelled data only. git push of labelled
+      data is therefore denied in v0.1; credential injection arrives in v0.2.
+      Other GitHub-owned hosts (for example githubusercontent.com) are not
+      covered and are denied.
+  # Private source in its own compartment. Receiving from it raises the session
+  # to include mail before the first response byte; the API may receive mail
+  # data back (replies), but not private or secret data.
+  - name: mail-api
+    hosts: [mail.example]
+    ports: [443]
+    clearance: [mail]
+    source_label: [mail]
+    comment: >-
+      Example private-source mail API. v0.1 cannot see recipients inside TLS,
+      so mailbox data may be sent through this API to any recipient; keep the
+      agent's own approval on for send tools (see the concept non-guarantees).
+
+backends:
+  # Image-local backend: cleared for every declared label. Placement prefers it
+  # first, so every request (labelled or not) lands on the local model unless
+  # it is unavailable.
+  - name: local-llama
+    kind: local
+    endpoint: http://127.0.0.1:8080/v1
+    clearance: [private, secret, mail]
+    digest_pinned: true
+    comment: >-
+      llama-server Quadlet inside the image; the image digest and model SHA-256
+      are recorded in receipts (Phase 2). This is digest pinning, not remote
+      attestation.
+  # Host endpoint: an unattested model on the development host, reachable from
+  # a Lima VM as host.lima.internal (192.168.5.2 on Lima's default user-mode
+  # network). Under plain QEMU user networking, as in CI, the host is 10.0.2.2.
+  # FOUNDER DECISION: the concept classes host endpoints as "unattested local".
+  # This draft clears it for unlabelled data only, so on the M1 a labelled
+  # session gets only the CPU-bound in-VM model. Adding private (not secret)
+  # here would keep private data on the physical machine but outside the VM's
+  # enforcement boundary.
+  - name: host-metal
+    kind: host
+    endpoint: http://host.lima.internal:11434/v1
+    clearance: []
+    digest_pinned: false
+    comment: >-
+      Optional host llama.cpp (Metal) or Ollama endpoint for the Lima
+      development loop. Recorded as unattested.
+  # Cloud providers: unlabelled data only, consistent with the local-only
+  # privacy default. Adding private to a cloud clearance is an explicit
+  # operator decision to let private data leave the machine.
+  - name: cloud-openai-compat
+    kind: cloud
+    endpoint: https://api.openai-compatible.example/v1
+    clearance: []
+    digest_pinned: false
+    comment: Example OpenAI-compatible cloud provider. Unlabelled data only.
+
+# Profile files arrive in Phase 1; these references do not resolve yet.
+profiles:
+  - name: hermes
+    path: profiles/hermes.yaml
+  - name: opencode
+    path: profiles/opencode.yaml

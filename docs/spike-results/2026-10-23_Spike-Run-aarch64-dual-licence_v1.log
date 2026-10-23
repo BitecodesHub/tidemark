@@ -1,0 +1,298 @@
+>> compiling BPF object for arm64
+# -mcpu=v3: __sync_fetch_and_or with a used result needs BPF ISA v3 atomics.
+# -fms-extensions: kernel 7.x BTF contains tagged anonymous struct members,
+# which bpftool reproduces in vmlinux.h (for example "struct ns_tree;"
+# inside a struct); clang rejects them under -Werror without the extension.
+clang -O2 -g -Wall -Werror \
+	-fms-extensions -Wno-microsoft-anon-tag \
+	-target bpf -mcpu=v3 -D__TARGET_ARCH_arm64 \
+	-Ibpf -c bpf/label_probe.bpf.c -o label_probe.bpf.o
+>> running the Phase 0 kernel spike (root)
+install -D -m 0755 tidemark-probe /usr/local/libexec/tidemark-probe
+env \
+	TM_ATTACH_MMAP_FILE="1" \
+	TM_BPF_OBJ="/opt/tidemark-spike/label_probe.bpf.o" \
+	TM_TESTS_DIR="/opt/tidemark-spike/tests" \
+	TM_BPFFS="/sys/fs/bpf/tidemark" \
+	TM_PROBE_BIN="/usr/local/libexec/tidemark-probe" \
+	"/usr/local/libexec/tidemark-probe" run
+=== Tidemark Phase 0 kernel spike (Phase 0 measurement instrument; results are from this run) ===
+ENV kernel: 7.2.0-61.fc45.aarch64
+ENV lsm: lockdown,capability,yama,selinux,bpf,landlock,ipe,ima,evm
+ENV landlock_abi: 10
+ENV bpf_real_data_inode: true
+INFO bpf_real_data_inode present in kernel BTF: true
+INFO probe loaded, maps and links pinned under /sys/fs/bpf/tidemark
+--- 01_label_before_open_grandchild.sh (timeout 2m0s)
+    | DESC: A1 label rises before open() returns for a grandchild opening an xattr-labelled file
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-1.scope id=9308 -> slot 1
+    | LINEAGE pid=9874 ppid=9873 grandparent=9872 moved=9872
+    | CGROUP own=/tmspike.slice/tm-sess-1.scope want=/tmspike.slice/tm-sess-1.scope
+    | open label=0x1 cause=0x11(open|xattr)
+    | open /var/tmp/tm-spike.bF5RSI/secret.txt: read 19 bytes after sampling
+    | readcause cause=0x11(open|xattr)
+    | RESULT: PASS
+PASS 01_label_before_open_grandchild.sh - A1 label rises before open() returns for a grandchild opening an xattr-labelled file
+--- 02_session_cgroup_keying.sh (timeout 2m0s)
+    | DESC: A2 session keyed by level-2 ancestor cgroup id; outside and sibling opens do not raise, child-cgroup opens do
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-2.scope id=9353 -> slot 2
+    | open label=0x0 cause=0x0(none)
+    | open /var/tmp/tm-spike.yr3Tl9/secret.txt: read 19 bytes after sampling
+    | LINEAGE pid=9953 ppid=9952 grandparent=9951 moved=9951
+    | CGROUP own=/tmspike.slice/tm-sess-2.scope want=/tmspike.slice/tm-sess-2.scope
+    | open label=0x1 cause=0x11(open|xattr)
+    | open /var/tmp/tm-spike.yr3Tl9/secret.txt: read 19 bytes after sampling
+    | LINEAGE pid=9966 ppid=9965 grandparent=9964 moved=9964
+    | CGROUP own=/tmspike.slice/tm-sess-2.scope/sub want=/tmspike.slice/tm-sess-2.scope/sub
+    | open label=0x1 cause=0x11(open|xattr)
+    | open /var/tmp/tm-spike.yr3Tl9/secret.txt: read 19 bytes after sampling
+    | LINEAGE pid=9981 ppid=9980 grandparent=9979 moved=9979
+    | CGROUP own=/tmspike.slice/tm-other-2.scope want=/tmspike.slice/tm-other-2.scope
+    | open label=0x0 cause=0x0(none)
+    | open /var/tmp/tm-spike.yr3Tl9/secret.txt: read 19 bytes after sampling
+    | RESULT: PASS
+PASS 02_session_cgroup_keying.sh - A2 session keyed by level-2 ancestor cgroup id; outside and sibling opens do not raise, child-cgroup opens do
+--- 03_overlay.sh (timeout 2m0s)
+    | DESC: A3 overlayfs: an unlabelled lower file opened via the overlay is labelled by a directory rule (gated); xattr path observed
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-3.scope id=9463 -> slot 3
+    | INFO root[0] = "/var/tmp/tm-spike.yVN8XN/merged" label=private
+    | LINEAGE pid=10058 ppid=10057 grandparent=10056 moved=10056
+    | CGROUP own=/tmspike.slice/tm-sess-3.scope want=/tmspike.slice/tm-sess-3.scope
+    | open label=0x1 cause=0x21(open|dir)
+    | open /var/tmp/tm-spike.yVN8XN/merged/plain.txt: read 19 bytes after sampling
+    | readcause cause=0x21(open|dir)
+    | LINEAGE pid=10118 ppid=10117 grandparent=10116 moved=10116
+    | CGROUP own=/tmspike.slice/tm-sess-3.scope want=/tmspike.slice/tm-sess-3.scope
+    | open label=0x1 cause=0x111(open|xattr|backing)
+    | open /var/tmp/tm-spike.yVN8XN/merged/doc.txt: read 19 bytes after sampling
+    | OBSERVE overlay xattr path: label=0x1 cause=0x111(open|xattr|backing)
+    | OBSERVE (label 0x1 with cause xattr|backing means the backing-file open read the lower xattr; cause cache means the data-inode cache contributed)
+    | RESULT: PASS
+PASS 03_overlay.sh - A3 overlayfs: an unlabelled lower file opened via the overlay is labelled by a directory rule (gated); xattr path observed
+--- 04_directory_rule.sh (timeout 2m0s)
+    | DESC: A4 directory rules: component-boundary match, unlabelled file labelled by rule, overlapping rules combine
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-4.scope id=9508 -> slot 4
+    | INFO root[0] = "/var/tmp/tm-spike.AFbgh1/Private" label=private
+    | INFO root[1] = "/var/tmp/tm-spike.AFbgh1/Private/keys" label=secret
+    | LINEAGE pid=10206 ppid=10205 grandparent=10204 moved=10204
+    | CGROUP own=/tmspike.slice/tm-sess-4.scope want=/tmspike.slice/tm-sess-4.scope
+    | open label=0x0 cause=0x0(none)
+    | open /var/tmp/tm-spike.AFbgh1/PrivateX/notes.txt: read 19 bytes after sampling
+    | LINEAGE pid=10213 ppid=10212 grandparent=10211 moved=10211
+    | CGROUP own=/tmspike.slice/tm-sess-4.scope want=/tmspike.slice/tm-sess-4.scope
+    | open label=0x1 cause=0x21(open|dir)
+    | open /var/tmp/tm-spike.AFbgh1/Private/notes.txt: read 19 bytes after sampling
+    | readcause cause=0x21(open|dir)
+    | LINEAGE pid=10230 ppid=10229 grandparent=10228 moved=10228
+    | CGROUP own=/tmspike.slice/tm-sess-4.scope want=/tmspike.slice/tm-sess-4.scope
+    | open label=0x3 cause=0x21(open|dir)
+    | open /var/tmp/tm-spike.AFbgh1/Private/keys/k.txt: read 19 bytes after sampling
+    | RESULT: PASS
+PASS 04_directory_rule.sh - A4 directory rules: component-boundary match, unlabelled file labelled by rule, overlapping rules combine
+--- 05_file_receive_scm.sh (timeout 2m0s)
+    | DESC: A5 file_receive raises the label when a labelled fd is passed into the session via SCM_RIGHTS
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-5.scope id=9553 -> slot 5
+    | LINEAGE pid=10302 ppid=10301 grandparent=10299 moved=10299
+    | CGROUP own=/tmspike.slice/tm-sess-5.scope want=/tmspike.slice/tm-sess-5.scope
+    | fd-send /var/tmp/tm-spike.iIRW9E/secret.txt: descriptor sent over /var/tmp/tm-spike.iIRW9E/fd.sock
+    | fd-recv label=0x1 cause=0x12(receive|xattr)
+    | fd-recv: read 16 bytes from the received descriptor
+    | readcause cause=0x12(receive|xattr)
+    | RESULT: PASS
+PASS 05_file_receive_scm.sh - A5 file_receive raises the label when a labelled fd is passed into the session via SCM_RIGHTS
+--- 06_mmapable_label.sh (timeout 2m0s)
+    | DESC: A6 the label array maps read-only, cannot be made writable, and reads the raised label
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-6.scope id=9598 -> slot 6
+    | LINEAGE pid=10381 ppid=10380 grandparent=10379 moved=10379
+    | CGROUP own=/tmspike.slice/tm-sess-6.scope want=/tmspike.slice/tm-sess-6.scope
+    | open label=0x1 cause=0x11(open|xattr)
+    | open /var/tmp/tm-spike.0SmVOG/secret.txt: read 19 bytes after sampling
+    | check-ro-mmap: PROT_READ mapping reads label=0x1
+    | check-ro-mmap: mprotect(PROT_WRITE) refused: EACCES
+    | check-ro-mmap: writable mapping of a BPF_F_RDONLY descriptor refused: EACCES
+    | OBSERVE a BPF_F_RDONLY descriptor cannot be mapped PROT_READ|MAP_SHARED: EINVAL (label transport must hand exits a read-write descriptor or use another channel)
+    | RESULT: PASS
+PASS 06_mmapable_label.sh - A6 the label array maps read-only, cannot be made writable, and reads the raised label
+--- 07_setxattr_eperm.sh (timeout 2m0s)
+    | DESC: A7 security.bpf.* setxattr is EPERM for a capability-less in-session process (positive control: user.* succeeds)
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-7.scope id=9643 -> slot 7
+    | LINEAGE pid=10456 ppid=10455 grandparent=10454 moved=10454
+    | CGROUP own=/tmspike.slice/tm-sess-7.scope want=/tmspike.slice/tm-sess-7.scope
+    | setxattr user.tm_probe: ok
+    | LINEAGE pid=10463 ppid=10462 grandparent=10461 moved=10461
+    | CGROUP own=/tmspike.slice/tm-sess-7.scope want=/tmspike.slice/tm-sess-7.scope
+    | setxattr security.bpf.tidemark: errno=EPERM
+    | setxattr security.bpf.tidemark: ok
+    | RESULT: PASS
+PASS 07_setxattr_eperm.sh - A7 security.bpf.* setxattr is EPERM for a capability-less in-session process (positive control: user.* succeeds)
+--- 08_mmap_read_label.sh (timeout 2m0s)
+    | DESC: A8 an open-then-mmap read of a labelled file leaves the label raised
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-8.scope id=9688 -> slot 8
+    | LINEAGE pid=10538 ppid=10537 grandparent=10536 moved=10536
+    | CGROUP own=/tmspike.slice/tm-sess-8.scope want=/tmspike.slice/tm-sess-8.scope
+    | mmapread /var/tmp/tm-spike.ZvNSpz/secret.txt: first byte 0x63
+    | mmapread label=0x1 cause=0x15(open|mmap|xattr)
+    | readcause cause=0x15(open|mmap|xattr)
+    | RESULT: PASS
+PASS 08_mmap_read_label.sh - A8 an open-then-mmap read of a labelled file leaves the label raised
+--- 09_file_receive_unprivileged.sh (timeout 2m0s)
+    | DESC: A5b unprivileged receiver of a root-only labelled fd: label still rises (fail-closed)
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-9.scope id=9733 -> slot 9
+    | LINEAGE pid=10619 ppid=10618 grandparent=10616 moved=10616
+    | CGROUP own=/tmspike.slice/tm-sess-9.scope want=/tmspike.slice/tm-sess-9.scope
+    | fd-send /var/tmp/tm-spike.a8DDVJ/rootonly.txt: descriptor sent over /var/tmp/tm-spike.a8DDVJ/rx/fd.sock
+    | fd-recv: label not sampled (--no-label); the script checks it as root
+    | fd-recv: read 16 bytes from the received descriptor
+    | readlabel label=0x4 cause=0x282(receive|error|eacces)
+    | readcause cause=0x282(receive|error|eacces)
+    | RESULT: PASS
+PASS 09_file_receive_unprivileged.sh - A5b unprivileged receiver of a root-only labelled fd: label still rises (fail-closed)
+--- 10_inherited_descriptor.sh (timeout 2m0s)
+    | DESC: A8b mmap of a pre-session descriptor raises the label (gated); read() on it is a recorded gap
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-10.scope id=9778 -> slot 10
+    | join-then-use: now in cgroup /tmspike.slice/tm-sess-10.scope
+    | OBSERVE inherited-descriptor read(): label=0x0 (0x0 is the documented gap)
+    | join-then-use mmap label=0x1 cause=0x14(mmap|xattr)
+    | readcause cause=0x14(mmap|xattr)
+    | RESULT: PASS
+PASS 10_inherited_descriptor.sh - A8b mmap of a pre-session descriptor raises the label (gated); read() on it is a recorded gap
+--- 11_userns_alias.sh (timeout 2m0s)
+    | DESC: A4b observation: a mount-namespace alias path escapes path-based directory rules (gap recorded; mitigated by G1)
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-11.scope id=9823 -> slot 11
+    | INFO root[0] = "/var/tmp/tm-spike.qAhrBa/Private" label=private
+    | LINEAGE pid=10776 ppid=10775 grandparent=10774 moved=10774
+    | CGROUP own=/tmspike.slice/tm-sess-11.scope want=/tmspike.slice/tm-sess-11.scope
+    | open label=0x1 cause=0x21(open|dir)
+    | open /var/tmp/tm-spike.qAhrBa/Private/notes.txt: read 19 bytes after sampling
+    | LINEAGE pid=10788 ppid=10787 grandparent=10786 moved=10786
+    | CGROUP own=/tmspike.slice/tm-sess-11.scope want=/tmspike.slice/tm-sess-11.scope
+    | open: label not sampled (--no-label); the script checks it as root
+    | open /var/tmp/tm-spike.qAhrBa/alias/notes.txt: read 19 bytes after sampling
+    | OBSERVE GAP alias path /var/tmp/tm-spike.qAhrBa/alias/notes.txt was not labelled by any rule (label=0x0 cause=0x0(none)); mitigation: deny namespace creation in sessions (G1)
+    | RESULT: PASS
+PASS 11_userns_alias.sh - A4b observation: a mount-namespace alias path escapes path-based directory rules (gap recorded; mitigated by G1)
+--- 12_link_rename_alias.sh (timeout 2m0s)
+    | DESC: A4c observation: a hard link or rename out of a labelled root escapes path-based rules (gap recorded)
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-12.scope id=9868 -> slot 12
+    | INFO root[0] = "/var/tmp/tm-spike.4GyBkL/Private" label=private
+    | LINEAGE pid=10874 ppid=10873 grandparent=10872 moved=10872
+    | CGROUP own=/tmspike.slice/tm-sess-12.scope want=/tmspike.slice/tm-sess-12.scope
+    | open label=0x0 cause=0x0(none)
+    | open /var/tmp/tm-spike.4GyBkL/linked.txt: read 19 bytes after sampling
+    | OBSERVE GAP hard link /var/tmp/tm-spike.4GyBkL/linked.txt: not labelled by any rule (label=0x0 cause=0x0(none))
+    | LINEAGE pid=10903 ppid=10902 grandparent=10901 moved=10901
+    | CGROUP own=/tmspike.slice/tm-sess-12.scope want=/tmspike.slice/tm-sess-12.scope
+    | open label=0x0 cause=0x0(none)
+    | open /var/tmp/tm-spike.4GyBkL/moved.txt: read 19 bytes after sampling
+    | OBSERVE GAP rename to /var/tmp/tm-spike.4GyBkL/moved.txt: not labelled by any rule (label=0x0 cause=0x0(none))
+    | RESULT: PASS
+PASS 12_link_rename_alias.sh - A4c observation: a hard link or rename out of a labelled root escapes path-based rules (gap recorded)
+--- 13_session_move_out.sh (timeout 2m0s)
+    | DESC: A2c an unprivileged session process cannot move itself out of, or restructure, its Delegate=no scope; the session still raises labels afterwards
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-13.scope id=9913 -> slot 13
+    | A2c(a) /sys/fs/cgroup/tmspike.slice/tm-other-13.scope: LINEAGE pid=10990 ppid=10989 grandparent=10988 moved=10988
+    | CGROUP own=/tmspike.slice/tm-sess-13.scope want=/tmspike.slice/tm-sess-13.scope
+    | try-move /sys/fs/cgroup/tmspike.slice/tm-other-13.scope/cgroup.procs: errno=EACCES
+    | try-move own cgroup now: /tmspike.slice/tm-sess-13.scope
+    | A2c(a) /sys/fs/cgroup: LINEAGE pid=10999 ppid=10998 grandparent=10997 moved=10997
+    | CGROUP own=/tmspike.slice/tm-sess-13.scope want=/tmspike.slice/tm-sess-13.scope
+    | try-move /sys/fs/cgroup/cgroup.procs: errno=EACCES
+    | try-move own cgroup now: /tmspike.slice/tm-sess-13.scope
+    | A2c(b) /sys/fs/cgroup/tmspike.slice/tm-sess-13.scope/escape: try-mkdir /sys/fs/cgroup/tmspike.slice/tm-sess-13.scope/escape: errno=EACCES
+    | LINEAGE pid=11021 ppid=11020 grandparent=11019 moved=11019
+    | CGROUP own=/tmspike.slice/tm-sess-13.scope want=/tmspike.slice/tm-sess-13.scope
+    | open label=0x1 cause=0x11(open|xattr)
+    | open /var/tmp/tm-spike.3wxF7k/secret.txt: read 19 bytes after sampling
+    | LINEAGE pid=11028 ppid=11027 grandparent=11026 moved=11026
+    | CGROUP own=/tmspike.slice/tm-sess-13.scope want=/tmspike.slice/tm-sess-13.scope
+    | try-move /sys/fs/cgroup/tmspike.slice/tm-sess-13.scope/cgroup.procs: ok
+    | try-move own cgroup now: /tmspike.slice/tm-sess-13.scope
+    | RESULT: PASS
+PASS 13_session_move_out.sh - A2c an unprivileged session process cannot move itself out of, or restructure, its Delegate=no scope; the session still raises labels afterwards
+--- 14_xattr_and_rule_invalidation.sh (timeout 2m0s)
+    | DESC: A12 a raised attribute is honoured on the next open (cache is a floor, never a hide); added and removed directory rules take effect on the next open; attribute removal is recorded as the Phase 1 invalidation gap
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-14.scope id=10003 -> slot 14
+    | setxattr security.bpf.tidemark: ok
+    | LINEAGE pid=11103 ppid=11102 grandparent=11101 moved=11101
+    | CGROUP own=/tmspike.slice/tm-sess-14.scope want=/tmspike.slice/tm-sess-14.scope
+    | open label=0x1 cause=0x11(open|xattr)
+    | open /var/tmp/tm-spike.ojwgtD/raise.txt: read 9 bytes after sampling
+    | readcause cause=0x11(open|xattr)
+    | setxattr security.bpf.tidemark: ok
+    | LINEAGE pid=11127 ppid=11126 grandparent=11125 moved=11125
+    | CGROUP own=/tmspike.slice/tm-sess-14.scope want=/tmspike.slice/tm-sess-14.scope
+    | open label=0x3 cause=0x51(open|xattr|cache)
+    | open /var/tmp/tm-spike.ojwgtD/raise.txt: read 9 bytes after sampling
+    | A12(b) after raising p to s: label=0x3
+    | readcause cause=0x51(open|xattr|cache)
+    | removexattr security.bpf.tidemark on /var/tmp/tm-spike.ojwgtD/raise.txt: ok (absent after removal)
+    | LINEAGE pid=11157 ppid=11156 grandparent=11155 moved=11155
+    | CGROUP own=/tmspike.slice/tm-sess-14.scope want=/tmspike.slice/tm-sess-14.scope
+    | open label=0x3 cause=0x41(open|cache)
+    | open /var/tmp/tm-spike.ojwgtD/raise.txt: read 9 bytes after sampling
+    | A12(c) OBSERVE after removing the attribute: label=0x3 cause=cause=0x41(open|cache) (a raised label here is the documented Phase 1 invalidation gap; 0x0 means the cache contributed nothing for this inode)
+    | LINEAGE pid=11182 ppid=11181 grandparent=11180 moved=11180
+    | CGROUP own=/tmspike.slice/tm-sess-14.scope want=/tmspike.slice/tm-sess-14.scope
+    | open label=0x0 cause=0x0(none)
+    | open /var/tmp/tm-spike.ojwgtD/ruledir/rule.txt: read 9 bytes after sampling
+    | INFO root[2] = "/var/tmp/tm-spike.ojwgtD/ruledir" label=secret
+    | LINEAGE pid=11199 ppid=11198 grandparent=11197 moved=11197
+    | CGROUP own=/tmspike.slice/tm-sess-14.scope want=/tmspike.slice/tm-sess-14.scope
+    | open label=0x2 cause=0x21(open|dir)
+    | open /var/tmp/tm-spike.ojwgtD/ruledir/rule.txt: read 9 bytes after sampling
+    | readcause cause=0x21(open|dir)
+    | INFO root[2] cleared
+    | LINEAGE pid=11222 ppid=11221 grandparent=11220 moved=11220
+    | CGROUP own=/tmspike.slice/tm-sess-14.scope want=/tmspike.slice/tm-sess-14.scope
+    | open label=0x0 cause=0x0(none)
+    | open /var/tmp/tm-spike.ojwgtD/ruledir/rule.txt: read 9 bytes after sampling
+    | RESULT: PASS
+PASS 14_xattr_and_rule_invalidation.sh - A12 a raised attribute is honoured on the next open (cache is a floor, never a hide); added and removed directory rules take effect on the next open; attribute removal is recorded as the Phase 1 invalidation gap
+--- 15_race_10k_iterations.sh (timeout 30m0s)
+    | DESC: A1r 10000 iterations, zero misses: label raised before open() returns, seen by the opener and by a separate observer process
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-15.scope id=10048 -> slot 15
+    | LINEAGE pid=11297 ppid=11296 grandparent=11291 moved=11291
+    | CGROUP own=/tmspike.slice/tm-sess-15.scope want=/tmspike.slice/tm-sess-15.scope
+    | RACE_SELF iterations=10000 misses=0 path=/var/tmp/tm-spike.LsUnt8/race.txt open_min_ns=1920 open_p50_ns=4799 open_p99_ns=10726 open_max_ns=38397
+    | RACE_OBSERVE iterations=10000 misses=0 slot=15
+    | readcause cause=0x11(open|xattr)
+    | RESULT: PASS
+PASS 15_race_10k_iterations.sh - A1r 10000 iterations, zero misses: label raised before open() returns, seen by the opener and by a separate observer process
+--- 16_open_latency_baseline.sh (timeout 20m0s)
+    | DESC: D5 open() latency baseline, outside session vs in-session unlabelled vs xattr-labelled vs raise-path vs directory rule (20000 iterations each, 2000 warmup)
+    | setxattr security.bpf.tidemark: ok
+    | INFO registered cgroup /sys/fs/cgroup/tmspike.slice/tm-sess-16.scope id=10093 -> slot 16
+    | INFO root[3] = "/var/tmp/tm-spike.aHmY1l/benchdir" label=secret
+    | BASELINE note: probe loaded, kernel 7.2.0-61.fc45.aarch64, arch aarch64; Phase 0 records numbers and sets no target.
+    | BENCH path=/var/tmp/tm-spike.aHmY1l/bench-clean.txt iterations=20000 warmup=2000 first_open_ns=7095 min_ns=751 p50_ns=877 p99_ns=1044 max_ns=46285 mean_ns=946
+    | LINEAGE pid=11386 ppid=11385 grandparent=11384 moved=11384
+    | CGROUP own=/tmspike.slice/tm-sess-16.scope want=/tmspike.slice/tm-sess-16.scope
+    | BENCH path=/var/tmp/tm-spike.aHmY1l/bench-clean.txt iterations=20000 warmup=2000 first_open_ns=7429 min_ns=1085 p50_ns=1210 p99_ns=1628 max_ns=65859 mean_ns=1254
+    | LINEAGE pid=11393 ppid=11392 grandparent=11391 moved=11391
+    | CGROUP own=/tmspike.slice/tm-sess-16.scope want=/tmspike.slice/tm-sess-16.scope
+    | BENCH path=/var/tmp/tm-spike.aHmY1l/bench-labelled.txt iterations=20000 warmup=2000 first_open_ns=9265 min_ns=1085 p50_ns=1210 p99_ns=1503 max_ns=53172 mean_ns=1239
+    | LINEAGE pid=11400 ppid=11399 grandparent=11398 moved=11398
+    | CGROUP own=/tmspike.slice/tm-sess-16.scope want=/tmspike.slice/tm-sess-16.scope
+    | BENCH path=/var/tmp/tm-spike.aHmY1l/bench-labelled.txt iterations=20000 warmup=2000 first_open_ns=7429 min_ns=1460 p50_ns=1586 p99_ns=4006 max_ns=108680 mean_ns=1731
+    | BENCH_READLABEL slot=16 p50_ns=5717 p99_ns=16318 misses=0 of 20000
+    | LINEAGE pid=11413 ppid=11412 grandparent=11411 moved=11411
+    | CGROUP own=/tmspike.slice/tm-sess-16.scope want=/tmspike.slice/tm-sess-16.scope
+    | BENCH path=/var/tmp/tm-spike.aHmY1l/benchdir/bench-ruled.txt iterations=20000 warmup=2000 first_open_ns=7847 min_ns=1085 p50_ns=1210 p99_ns=2671 max_ns=76126 mean_ns=1292
+    | LINEAGE pid=11425 ppid=11424 grandparent=11423 moved=11423
+    | CGROUP own=/tmspike.slice/tm-sess-16.scope want=/tmspike.slice/tm-sess-16.scope
+    | open label=0x2 cause=0x21(open|dir)
+    | open /var/tmp/tm-spike.aHmY1l/benchdir/bench-ruled.txt: read 6 bytes after sampling
+    | RESULT: PASS
+PASS 16_open_latency_baseline.sh - D5 open() latency baseline, outside session vs in-session unlabelled vs xattr-labelled vs raise-path vs directory rule (20000 iterations each, 2000 warmup)
+SUMMARY: ALL PASS (16/16)
+INFO probe unloaded, pins removed from /sys/fs/bpf/tidemark

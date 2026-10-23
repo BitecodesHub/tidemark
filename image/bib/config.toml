@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# bootc-image-builder configuration for the AgentOS Tidemark qcow2.
+# Status: Phase 0 draft (2026-10-16). Used by .github/workflows/boot-test.yml,
+# which mounts this file at /config.toml in the bootc-image-builder container.
+# (The image-builder CLI that replaces bootc-image-builder takes the same
+# customizations through --blueprint.)
+#
+# Deliberately absent: users, passwords and SSH keys. The boot test reads only
+# the serial console, so the CI disk image has no login credentials at all.
+# For local debugging, add a [[customizations.user]] entry with your own SSH
+# public key in a private copy of this file; never commit credentials.
+#
+# The root filesystem type is passed on the command line (--rootfs xfs),
+# because the Fedora bootc base image does not set a default. xfs supports the
+# extended attributes and FS_APPEND_FL that the self-test checks on /var.
+
+[customizations.kernel]
+# The last console= entry becomes /dev/console, where the self-test unit
+# writes its result line; ttyS0 is the first serial port on x86_64 QEMU.
+append = "console=tty0 console=ttyS0,115200n8"

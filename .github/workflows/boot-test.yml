@@ -1,0 +1,362 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# AgentOS Tidemark: QEMU/KVM serial-console boot test (reusable workflow).
+# Status: Phase 0 draft (2026-10-16, revised after review). Not yet run.
+# See docs/2026-10-16_Image-Pipeline_v1.md.
+#
+# Called by build-image.yml once per image variant, inside the same workflow
+# run, so that it boots the exact archive the build job produced and the
+# publish job later pushes. It does not build the image itself.
+#
+# Input artifact (from the build job): tidemark-image-<variant>, holding
+# tidemark-<variant>.oci.tar and image-id (the config digest).
+#
+# Steps: load the archive into root's container storage and check its image
+# ID; turn it into a qcow2 with bootc-image-builder (privileged podman on the
+# runner); enable KVM with the udev rule documented by GitHub; boot the disk
+# twice under QEMU with UEFI firmware, no network and a serial console, on one
+# copy-on-write overlay so that the second boot sees the first boot's /var.
+# It passes only if:
+#   - boot 1 prints the first-boot banner and exactly one TIDEMARK_SELFTEST
+#     line, with result=PASS;
+#   - boot 2 prints exactly one TIDEMARK_SELFTEST line, with result=PASS, and
+#     no first-boot banner.
+# Both serial logs are always uploaded as an artifact.
+#
+# Not yet covered: running the Phase 0 kernel probe inside the booted image
+# (checklist items E3 and T2); see section 6.2 of the pipeline document.
+# Only x86_64 is boot-tested. aarch64 boot tests are not run in Phase 0
+# (arm64 runners may lack /dev/kvm).
+#
+# Every third-party action is pinned by full commit SHA; the trailing comment
+# names the release tag. Container images are pinned by digest below.
+
+name: boot-test
+
+on:
+  workflow_call:
+    inputs:
+      variant:
+        description: "Image variant (fedora-45 or fedora-44); selects the artifact tidemark-image-<variant>."
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  LOCAL_TAG: localhost/tidemark:boot-test
+  # bootc-image-builder compatibility container (latest as of 2026-10-15).
+  # Upstream now recommends ghcr.io/osbuild/image-builder-cli; see the
+  # pipeline document for the migration note.
+  BIB_IMAGE: quay.io/centos-bootc/bootc-image-builder:latest@sha256:30e7eac70b6e4448da57aaff66d6a89dbd1526572e8b77be31da129e692eb3e9
+  BOOT_TIMEOUT_SECONDS: "600"
+  # After the result line, how long to keep waiting for multi-user.target.
+  MULTI_USER_GRACE_SECONDS: "30"
+  POWERDOWN_TIMEOUT_SECONDS: "120"
+  # The pattern ends with the space after the failed= field, so a result line
+  # that is still being written to the log cannot match early.
+  RESULT_PATTERN: "TIDEMARK_SELFTEST v=[0-9]+ result=(PASS|FAIL) phase=[0-9]+ failed=[^ ]+ "
+  BANNER_TEXT: "AgentOS Tidemark: Phase 0 draft image"
+
+jobs:
+  qemu-x86_64:
+    name: boot test (x86_64, QEMU/KVM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      VARIANT: ${{ inputs.variant }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Enable KVM
+        run: |
+          # Udev rule from the GitHub changelog of 2 April 2024 (hardware
+          # accelerated virtualization on GitHub-hosted Linux runners).
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle
+          if [[ ! -c /dev/kvm || ! -w /dev/kvm ]]; then
+            echo "::error::/dev/kvm is not available on this runner"
+            exit 1
+          fi
+          ls -l /dev/kvm
+
+      - name: Install QEMU and UEFI firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf
+          qemu-system-x86_64 --version
+
+      - name: Download the image archive from the build job
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tidemark-image-${{ inputs.variant }}
+          path: ${{ runner.temp }}/image
+
+      - name: Load the archive and check its image ID
+        run: |
+          archive="${RUNNER_TEMP}/image/tidemark-${VARIANT}.oci.tar"
+          expected_id="$(cat "${RUNNER_TEMP}/image/image-id")"
+          expected_id="${expected_id#sha256:}"
+          loaded_id="$(sudo podman pull --quiet "oci-archive:${archive}" | tail -n 1)"
+          loaded_id="${loaded_id#sha256:}"
+          if [[ "${loaded_id}" != "${expected_id}" ]]; then
+            echo "::error::loaded image ${loaded_id} is not the built image ${expected_id}"
+            exit 1
+          fi
+          sudo podman tag "${loaded_id}" "${LOCAL_TAG}"
+          rm -f "${archive}"
+          echo "Boot-testing image sha256:${loaded_id} (${VARIANT})"
+
+      - name: Build qcow2 with bootc-image-builder
+        run: |
+          mkdir -p output
+          sudo podman pull "${BIB_IMAGE}"
+          sudo podman run --rm --privileged \
+            --security-opt label=type:unconfined_t \
+            -v "${GITHUB_WORKSPACE}/image/bib/config.toml:/config.toml:ro" \
+            -v "${GITHUB_WORKSPACE}/output:/output" \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            "${BIB_IMAGE}" \
+            --type qcow2 \
+            --rootfs xfs \
+            "${LOCAL_TAG}"
+          sudo chown -R "$(id -u):$(id -g)" output
+          qcow2="$(find output -type f -name '*.qcow2' | head -n 1)"
+          if [[ -z "${qcow2}" ]]; then
+            echo "::error::bootc-image-builder produced no qcow2"
+            find output -maxdepth 3 -ls
+            exit 1
+          fi
+          qemu-img info "${qcow2}"
+          echo "QCOW2=${GITHUB_WORKSPACE}/${qcow2}" >> "${GITHUB_ENV}"
+
+      - name: Boot twice under QEMU and read the self-test results
+        run: |
+          set -euo pipefail
+
+          code_fd=""
+          for candidate in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
+            if [[ -r "${candidate}" ]]; then
+              code_fd="${candidate}"
+              break
+            fi
+          done
+          if [[ -z "${code_fd}" ]]; then
+            echo "::error::OVMF firmware not found"
+            exit 1
+          fi
+          vars_fd="${RUNNER_TEMP}/OVMF_VARS.fd"
+          cp "${code_fd/CODE/VARS}" "${vars_fd}"
+
+          # Both boots share one copy-on-write overlay, so the second boot sees
+          # the first boot's /var (and its first-boot stamp), while the qcow2
+          # from bootc-image-builder stays unchanged.
+          overlay="${RUNNER_TEMP}/run.qcow2"
+          qemu-img create -f qcow2 -F qcow2 -b "${QCOW2}" "${overlay}"
+          monitor="${RUNNER_TEMP}/qemu-monitor.sock"
+          log1="${GITHUB_WORKSPACE}/serial-boot1.log"
+          log2="${GITHUB_WORKSPACE}/serial-boot2.log"
+          qemu_pid=""
+
+          start_vm() {
+            local log=$1
+            rm -f "${monitor}"
+            : > "${log}"
+            qemu-system-x86_64 \
+              -name tidemark-boot-test \
+              -machine q35,accel=kvm \
+              -cpu host -smp 2 -m 4096 \
+              -drive "if=pflash,format=raw,unit=0,readonly=on,file=${code_fd}" \
+              -drive "if=pflash,format=raw,unit=1,file=${vars_fd}" \
+              -drive "if=virtio,format=qcow2,file=${overlay}" \
+              -nic none \
+              -display none \
+              -monitor "unix:${monitor},server=on,wait=off" \
+              -serial "file:${log}" \
+              -no-reboot &
+            qemu_pid=$!
+          }
+
+          # Prints the first complete result line, from the token onward.
+          result_line() {
+            tr -d '\r' < "$1" | grep -a -E -o -m 1 "${RESULT_PATTERN}.*" || true
+          }
+
+          # Prints how many result lines the log contains.
+          result_count() {
+            tr -d '\r' < "$1" | grep -a -E -c "${RESULT_PATTERN}" || true
+          }
+
+          # wait_for_result LOG GRACE: polls LOG every 2 seconds until a result
+          # line appears, then for up to GRACE more seconds until systemd
+          # reports multi-user.target (which it reaches only after both oneshot
+          # units finish). Sets result_at and multi_user_at, in seconds since
+          # QEMU started.
+          wait_for_result() {
+            local log=$1 grace=$2 start=${SECONDS} grace_end=0 found=""
+            result_at=""
+            multi_user_at=""
+            while true; do
+              if [[ -z "${multi_user_at}" ]] && grep -a -q 'Reached target.*[Mm]ulti-[Uu]ser' "${log}"; then
+                multi_user_at=$((SECONDS - start))
+              fi
+              if [[ -z "${found}" && -n "$(result_line "${log}")" ]]; then
+                found=yes
+                result_at=$((SECONDS - start))
+                grace_end=$((SECONDS + grace))
+              fi
+              if [[ -n "${found}" ]] && { [[ -n "${multi_user_at}" ]] || (( SECONDS >= grace_end )); }; then
+                break
+              fi
+              if ! kill -0 "${qemu_pid}" 2>/dev/null; then
+                echo "::warning::QEMU exited before the boot finished"
+                break
+              fi
+              if (( SECONDS - start > BOOT_TIMEOUT_SECONDS )); then
+                echo "::error::no self-test result within ${BOOT_TIMEOUT_SECONDS} s"
+                break
+              fi
+              sleep 2
+            done
+          }
+
+          # stop_vm: asks the guest to power off through ACPI (QEMU monitor
+          # command system_powerdown), then falls back to SIGTERM and SIGKILL.
+          # Sets clean_stop to yes or no.
+          stop_vm() {
+            local deadline=$((SECONDS + POWERDOWN_TIMEOUT_SECONDS))
+            clean_stop=yes
+            if kill -0 "${qemu_pid}" 2>/dev/null; then
+              if ! python3 -I -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.settimeout(10); s.connect(sys.argv[1]); s.sendall(b"system_powerdown\n"); time.sleep(1); s.close()' "${monitor}"; then
+                echo "::warning::could not send system_powerdown to the QEMU monitor"
+              fi
+            fi
+            while kill -0 "${qemu_pid}" 2>/dev/null; do
+              if (( SECONDS >= deadline )); then
+                echo "::warning::the guest did not power off within ${POWERDOWN_TIMEOUT_SECONDS} s; stopping QEMU"
+                clean_stop=no
+                kill "${qemu_pid}" 2>/dev/null || true
+                sleep 10
+                kill -KILL "${qemu_pid}" 2>/dev/null || true
+                break
+              fi
+              sleep 2
+            done
+            wait "${qemu_pid}" 2>/dev/null || true
+          }
+
+          uptime_of() {
+            local re=' uptime_s=([^ ]+)'
+            if [[ "$1" =~ ${re} ]]; then
+              printf '%s' "${BASH_REMATCH[1]}"
+            else
+              printf 'unknown'
+            fi
+          }
+
+          failures=()
+
+          echo "Boot 1: first boot (banner and self-test from tidemark-firstboot.service)"
+          start_vm "${log1}"
+          wait_for_result "${log1}" "${MULTI_USER_GRACE_SECONDS}"
+          boot1_result_at="${result_at:-none}"
+          boot1_multi_user_at="${multi_user_at:-not seen}"
+          stop_vm
+          boot1_clean="${clean_stop}"
+          # Read the line again after QEMU stopped, so that it is complete and
+          # output written between the last poll and the stop is included.
+          boot1_line="$(result_line "${log1}")"
+          boot1_count="$(result_count "${log1}")"
+
+          boot2_line=""
+          boot2_count="not run"
+          boot2_result_at="not run"
+          boot2_clean="not run"
+          if [[ -n "${boot1_line}" ]]; then
+            echo "Boot 2: same disk (self-test from tidemark-selftest.service, no banner)"
+            start_vm "${log2}"
+            wait_for_result "${log2}" 0
+            boot2_result_at="${result_at:-none}"
+            stop_vm
+            boot2_clean="${clean_stop}"
+            boot2_line="$(result_line "${log2}")"
+            boot2_count="$(result_count "${log2}")"
+          fi
+
+          if [[ -z "${boot1_line}" ]]; then
+            failures+=("boot 1 printed no TIDEMARK_SELFTEST line")
+          else
+            [[ "${boot1_line}" == *" result=PASS "* ]] || failures+=("boot 1: the self-test did not pass")
+            [[ "${boot1_count}" == 1 ]] || failures+=("boot 1 printed ${boot1_count} result lines; expected exactly 1")
+            grep -a -q -F "${BANNER_TEXT}" "${log1}" || failures+=("boot 1 printed no first-boot banner")
+            if [[ -z "${boot2_line}" ]]; then
+              failures+=("boot 2 printed no TIDEMARK_SELFTEST line")
+            else
+              [[ "${boot2_line}" == *" result=PASS "* ]] || failures+=("boot 2: the self-test did not pass")
+              [[ "${boot2_count}" == 1 ]] || failures+=("boot 2 printed ${boot2_count} result lines; expected exactly 1")
+              if grep -a -q -F "${BANNER_TEXT}" "${log2}"; then
+                failures+=("boot 2 repeated the first-boot banner")
+              fi
+            fi
+          fi
+
+          {
+            echo "## Boot test (x86_64, QEMU/KVM, ${VARIANT})"
+            echo ""
+            echo "| Measure | Boot 1 (first boot) | Boot 2 |"
+            echo "|---|---|---|"
+            echo "| Result line seen, seconds after QEMU start | ${boot1_result_at} | ${boot2_result_at} |"
+            echo "| Guest uptime when the self-test started (uptime_s) | $(uptime_of "${boot1_line}") | $(uptime_of "${boot2_line}") |"
+            echo "| multi-user.target seen, seconds after QEMU start | ${boot1_multi_user_at} | not measured |"
+            echo "| Result lines printed | ${boot1_count} | ${boot2_count} |"
+            echo "| Clean ACPI power-off | ${boot1_clean} | ${boot2_clean} |"
+            echo ""
+            echo "Phase 0 target P2 is multi-user in 90 seconds or less (informational). The"
+            echo "multi-user figure includes the self-test run time, has 2-second resolution and"
+            echo "needs systemd status output on the serial console."
+            echo ""
+            echo '```'
+            echo "boot 1: ${boot1_line:-no TIDEMARK_SELFTEST line found}"
+            echo "boot 2: ${boot2_line:-no TIDEMARK_SELFTEST line found}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if (( ${#failures[@]} > 0 )); then
+            for failure in "${failures[@]}"; do
+              echo "::error::${failure}"
+            done
+            echo "--- last 60 lines of the boot 1 serial log ---"
+            tail -n 60 "${log1}" | tr -d '\r' || true
+            if [[ -s "${log2}" ]]; then
+              echo "--- last 60 lines of the boot 2 serial log ---"
+              tail -n 60 "${log2}" | tr -d '\r' || true
+            fi
+            exit 1
+          fi
+          echo "${boot1_line}"
+          echo "${boot2_line}"
+          echo "Boot self-test passed on two consecutive boots."
+
+      - name: Upload serial logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tidemark-boot-test-serial-logs-${{ inputs.variant }}
+          path: |
+            serial-boot1.log
+            serial-boot2.log
+          if-no-files-found: warn
+          retention-days: 30

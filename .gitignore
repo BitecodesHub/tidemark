@@ -1,0 +1,124 @@
+# AgentOS Tidemark .gitignore (Phase 0 draft, 2026-10-16)
+
+# ---------------------------------------------------------------------------
+# Go
+# ---------------------------------------------------------------------------
+/bin/
+/dist/
+/out/
+/_output/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+*.pprof
+coverage.out
+coverage.html
+coverage.txt
+cover.out
+go.work
+go.work.sum
+# Native fuzzing corpora under testdata/fuzz/ are committed on purpose;
+# only the local cache is ignored.
+/.cache/
+
+# ---------------------------------------------------------------------------
+# BPF build outputs (regenerate with go generate / bpf2go in a Fedora toolbox)
+# ---------------------------------------------------------------------------
+vmlinux.h
+*_bpfel.go
+*_bpfeb.go
+*_bpfel.o
+*_bpfeb.o
+*.o
+*.ll
+*.bc
+
+# ---------------------------------------------------------------------------
+# Disk images and image-builder output
+# ---------------------------------------------------------------------------
+*.qcow2
+*.raw
+*.img
+*.iso
+*.vmdk
+*.vhd
+*.vhdx
+*.ova
+*.tar.zst
+/image/bib/output/
+/output/
+
+# ---------------------------------------------------------------------------
+# RPM build output
+# ---------------------------------------------------------------------------
+/packaging/rpm/BUILD/
+/packaging/rpm/BUILDROOT/
+/packaging/rpm/RPMS/
+/packaging/rpm/SRPMS/
+*.rpm
+
+# ---------------------------------------------------------------------------
+# Benchmark, demo and test run output (may contain canaries or sink logs)
+# ---------------------------------------------------------------------------
+/bench/results/
+/demo/run/
+*.canary
+*.sinklog
+
+# ---------------------------------------------------------------------------
+# Secrets and local configuration (never commit)
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.env
+cosign.key
+*.p12
+*.pfx
+/secrets/
+# Generic key material (fake SSH keys and Ed25519 receipt keys are generated
+# at run time). Public keys stay trackable. A public certificate that must be
+# committed is added explicitly with git add -f after review.
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.ed25519
+!*.pub
+
+# ---------------------------------------------------------------------------
+# Virtual machine and tool state
+# ---------------------------------------------------------------------------
+.lima/
+.vagrant/
+*.log
+# Phase 0 spike evidence is committed deliberately: the run logs are the
+# kill-gate evidence referenced by docs/spike-results/. Nothing else may log.
+!docs/spike-results/*.log
+
+# ---------------------------------------------------------------------------
+# Editors and operating systems
+# ---------------------------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Local AI-assistant settings (shared settings, if any, are committed)
+# ---------------------------------------------------------------------------
+.claude/settings.local.json

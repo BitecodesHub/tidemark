@@ -1,0 +1,6 @@
+# Kernel-spike build outputs (generated inside the Fedora VM).
+/label_probe.bpf.o
+/tidemark-probe
+/bpf/vmlinux.h
+/bpf/vmlinux.h.tmp
+/.cache/

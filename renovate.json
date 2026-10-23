@@ -1,0 +1,55 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "AgentOS Tidemark dependency updates. Status: Phase 0 draft (2026-10-16, revised after review). JSON has no comments, so this field records the justification.",
+    "Why Renovate and not Dependabot: (1) Renovate refreshes the digest of an unchanged tag (fedora-bootc:45 is rebuilt daily) and can hold each Containerfile on its own tag (45 in Containerfile, 44 in Containerfile.f44); (2) a regex manager keeps the bootc-image-builder, syft and trivy images pinned by digest inside workflow env blocks, which Dependabot does not parse; (3) it updates SHA-pinned GitHub Actions together with their version comments; (4) the concept document already names Renovate for digest pinning.",
+    "Cooldown: the 7-day minimumReleaseAge applies to GitHub Actions only. Quay and GHCR return no release timestamps, so with the default minimumReleaseAgeBehaviour (timestamp-required) a cooldown on container images would hold their updates indefinitely. Container-image updates (base images and workflow tool images) instead arrive on a weekly schedule, each pull request runs the image build and both boot tests, and a human reviews every one before merging.",
+    "Cost: the hosted Mend Renovate GitHub App needs write access to the repository; the founder must approve installing it, or run Renovate self-hosted instead.",
+    "Not covered (update by hand): the actionlint version and SHA-256 and the pip hashes in .github/workflows/lint.yml, and COSIGN_VERSION in build-image.yml."
+  ],
+  "extends": ["config:best-practices"],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 5,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Container images pinned as name:tag@sha256:digest in workflow files (bootc-image-builder, syft, trivy).",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "(?<depName>(?:quay\\.io|ghcr\\.io|docker\\.io)/[a-z0-9._/-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Main image stays on Fedora 45; moving to Fedora 46 needs a new base-image ADR.",
+      "matchFileNames": ["image/Containerfile"],
+      "matchPackageNames": ["quay.io/fedora/fedora-bootc"],
+      "allowedVersions": "/^45$/"
+    },
+    {
+      "description": "Fallback image stays on Fedora 44 until launch.",
+      "matchFileNames": ["image/Containerfile.f44"],
+      "matchPackageNames": ["quay.io/fedora/fedora-bootc"],
+      "allowedVersions": "/^44$/"
+    },
+    {
+      "description": "Base-image digest refreshes: one grouped pull request per week; each one runs the image build and both boot tests.",
+      "matchPackageNames": ["quay.io/fedora/fedora-bootc"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "fedora-bootc base image digests",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Supply-chain cooldown for GitHub Actions: wait 7 days after a release before proposing it. The GitHub datasources return release timestamps, so the cooldown can release these updates.",
+      "matchManagers": ["github-actions"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Workflow tool images (bootc-image-builder, syft, trivy) on Quay and GHCR: no release timestamps exist, so no cooldown; a weekly schedule and human review instead.",
+      "matchManagers": ["custom.regex"],
+      "schedule": ["before 6am on monday"]
+    }
+  ]
+}

@@ -1,0 +1,211 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# AgentOS Tidemark: lint.
+# Status: Phase 0 draft (2026-10-16). See docs/2026-10-16_Image-Pipeline_v1.md.
+#
+# Jobs:
+#   actionlint      workflow files (actionlint also runs shellcheck on run: blocks)
+#   shellcheck      every *.sh file in the repository
+#   policy-schema   policy/default.yaml validated against spec/policy-v0.schema.json
+#   markdown-links  relative links in Markdown files (offline; non-gating)
+#
+# Every third-party action is pinned by full commit SHA; the trailing comment
+# names the release tag. Downloaded tools and Python packages are pinned by
+# version and SHA-256.
+
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+      # SHA-256 of actionlint_1.7.12_linux_amd64.tar.gz, checked against the
+      # release checksums file on 2026-10-16.
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint (pinned by SHA-256)
+        run: |
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/actionlint"
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}/actionlint" actionlint
+          "${RUNNER_TEMP}/actionlint/actionlint" -version
+
+      - name: Run actionlint
+        run: |
+          shellcheck --version
+          "${RUNNER_TEMP}/actionlint/actionlint" -color
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run shellcheck on every shell script
+        run: |
+          shellcheck --version
+          mapfile -d '' scripts < <(git ls-files -z -- '*.sh' '*.bash')
+          if (( ${#scripts[@]} == 0 )); then
+            echo "No shell scripts found."
+            exit 0
+          fi
+          printf 'checking %s\n' "${scripts[@]}"
+          shellcheck --external-sources "${scripts[@]}"
+
+  policy-schema:
+    name: policy schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install jsonschema and PyYAML (pinned by SHA-256)
+        run: |
+          # Wheels for CPython 3.12 on manylinux x86_64 (the ubuntu-24.04
+          # system Python). Hashes taken from the PyPI JSON API on 2026-10-16.
+          cat > "${RUNNER_TEMP}/requirements.txt" <<'EOF'
+          jsonschema==4.26.0 --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+          jsonschema-specifications==2025.9.1 --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+          referencing==0.37.0 --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+          rpds-py==2026.9.1 --hash=sha256:addeda51556dac7c1a2f14cda62db8b621cd12afba3091d03a96c72932387eab
+          attrs==26.1.0 --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+          typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+          PyYAML==6.0.3 --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+          EOF
+          python3 --version
+          python3 -m venv "${RUNNER_TEMP}/venv"
+          "${RUNNER_TEMP}/venv/bin/python" -m pip install --quiet --disable-pip-version-check \
+            --no-deps --only-binary=:all: --require-hashes -r "${RUNNER_TEMP}/requirements.txt"
+
+      - name: Validate policy/default.yaml against spec/policy-v0.schema.json
+        run: |
+          "${RUNNER_TEMP}/venv/bin/python" -I - <<'PY'
+          """Validate the default policy against the v0 JSON Schema.
+
+          YAML timestamps are kept as strings so that dates do not turn into
+          Python datetime objects, and duplicate mapping keys are rejected,
+          because an ambiguous policy file must never pass.
+          """
+          import json
+          import pathlib
+          import sys
+
+          import jsonschema
+          import yaml
+
+          SCHEMA = pathlib.Path("spec/policy-v0.schema.json")
+          POLICY = pathlib.Path("policy/default.yaml")
+
+
+          class StrictLoader(yaml.SafeLoader):
+              """SafeLoader without timestamp resolution and with duplicate-key errors."""
+
+
+          StrictLoader.yaml_implicit_resolvers = {
+              first: [r for r in resolvers if r[0] != "tag:yaml.org,2002:timestamp"]
+              for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+          }
+
+
+          def construct_mapping(loader, node, deep=False):
+              seen = set()
+              for key_node, _ in node.value:
+                  key = loader.construct_object(key_node, deep=deep)
+                  if key in seen:
+                      raise yaml.constructor.ConstructorError(
+                          None, None, f"duplicate key {key!r}", key_node.start_mark
+                      )
+                  seen.add(key)
+              return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+          StrictLoader.add_constructor(
+              yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping
+          )
+
+          missing = [str(p) for p in (SCHEMA, POLICY) if not p.is_file()]
+          if missing:
+              for path in missing:
+                  print(f"::error file={path}::required file is missing")
+              sys.exit(1)
+
+          schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+          validator_cls = jsonschema.validators.validator_for(schema)
+          validator_cls.check_schema(schema)
+          print(f"schema dialect: {validator_cls.__name__}")
+
+          try:
+              policy = yaml.load(POLICY.read_text(encoding="utf-8"), Loader=StrictLoader)
+          except yaml.YAMLError as exc:
+              print(f"::error file={POLICY}::{exc}")
+              sys.exit(1)
+
+          validator = validator_cls(schema, format_checker=validator_cls.FORMAT_CHECKER)
+          errors = sorted(validator.iter_errors(policy), key=lambda e: list(e.absolute_path))
+          for err in errors:
+              where = "/".join(str(p) for p in err.absolute_path) or "<root>"
+              print(f"::error file={POLICY}::{where}: {err.message}")
+          if errors:
+              print(f"{len(errors)} schema violation(s)")
+              sys.exit(1)
+          print(f"{POLICY} is valid against {SCHEMA}")
+          PY
+
+  markdown-links:
+    name: markdown links (non-gating)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Optional check: relative links only (offline), so it never depends on
+    # third-party sites. It reports but does not fail the workflow.
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check relative Markdown links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --offline --no-progress './**/*.md'
+          fail: true
+          jobSummary: true
+          output: ${{ runner.temp }}/lychee.md

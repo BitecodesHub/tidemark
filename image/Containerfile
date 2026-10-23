@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# AgentOS Tidemark bootc image.
+# Status: Phase 0 draft (2026-10-16, revised after review). This image is a
+# build, signing and boot pipeline test. It contains no Tidemark enforcement:
+# no labels, no gateway, no model broker, no staging and no receipts. Do not
+# use it to protect data.
+#
+# Build context: the image/ directory, for example
+#   podman build -f image/Containerfile -t localhost/tidemark:dev image/
+#
+# Base image: quay.io/fedora/fedora-bootc tag 45, pinned by the digest of its
+# multi-architecture OCI image index, resolved on 2026-10-16 at about 16:16 UTC
+# through https://quay.io/api/v1/repository/fedora/fedora-bootc/tag/?specificTag=45
+#   index (pinned below)  sha256:86cc9d98ef210b71a6c4eeec4b7d04e7fef0a4415184c2322a14c879df189f45
+#   linux/amd64 child     sha256:4e5c285af0fbf9698525a3c5ff6b6dbfc5c1d6102b0f1f46a48b2c437ffe533c
+#   linux/arm64 child     sha256:78d94543f47b1b147af00a83c5ecd79023db5073cb0c90fc74f4d00cae9a1ed4
+#   (ppc64le and s390x children also exist; Tidemark does not build them)
+#   image version 45.20261016.0; amd64 kernel 7.2.9-300.fc45.x86_64 (ostree.linux label)
+# The tag is rebuilt daily, so the digest is the identity. Renovate proposes
+# digest refreshes; moving to Fedora 46 requires a new base-image ADR.
+# Fallback build on Fedora 44: image/Containerfile.f44 (kept until launch).
+FROM quay.io/fedora/fedora-bootc:45@sha256:86cc9d98ef210b71a6c4eeec4b7d04e7fef0a4415184c2322a14c879df189f45
+
+LABEL org.opencontainers.image.title="AgentOS Tidemark (Phase 0 draft)" \
+      org.opencontainers.image.description="Phase 0 pipeline-test image: boot self-test only, no Tidemark enforcement." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.base.name="quay.io/fedora/fedora-bootc:45" \
+      io.github.bitecodeshub.tidemark.phase="0"
+
+# Phase 1 placeholder (not active): install the Tidemark RPM that an earlier
+# job of the same CI run built, from the build context, after checking its
+# SHA-256; never from a network repository at build time
+# (docs/adr/2026-10-16_Delivery-RPM-Plus-Image_v1.md). Then enable its units.
+# COPY rpms/ /tmp/rpms/
+# RUN cd /tmp/rpms && sha256sum -c tidemark.sha256 && \
+#     dnf -y install ./tidemark-<version>.rpm && dnf clean all && \
+#     rm -rf /tmp/rpms && systemctl enable tidemarkd.service
+
+# Fail the build early if the base image stops shipping a tool that the
+# self-test relies on. Phase 0 installs no packages.
+RUN set -eu; \
+    for tool in bash python3 setfattr getfattr chattr lsattr unshare mount stat grep mktemp; do \
+        command -v "$tool" >/dev/null || { echo "missing tool in base image: $tool" >&2; exit 1; }; \
+    done
+
+COPY selftest/tidemark-selftest.sh /usr/libexec/tidemark/tidemark-selftest.sh
+COPY firstboot/tidemark-firstboot.sh /usr/libexec/tidemark/tidemark-firstboot.sh
+COPY systemd/tidemark-selftest.service /usr/lib/systemd/system/tidemark-selftest.service
+COPY firstboot/tidemark-firstboot.service /usr/lib/systemd/system/tidemark-firstboot.service
+
+RUN set -eu; \
+    chmod 0755 /usr/libexec/tidemark /usr/libexec/tidemark/tidemark-selftest.sh /usr/libexec/tidemark/tidemark-firstboot.sh; \
+    chmod 0644 /usr/lib/systemd/system/tidemark-selftest.service /usr/lib/systemd/system/tidemark-firstboot.service; \
+    systemctl enable tidemark-selftest.service tidemark-firstboot.service
+
+# No telemetry.
+# - The rpm-ostree countme timer sends a weekly anonymous count to Fedora
+#   mirrors; mask it (masking also covers the case where the unit is absent).
+# - DNF repository files carry countme=1; turn it off.
+# - NetworkManager connectivity checks contact a remote host; disable them.
+# No unverified automatic updates.
+# - bootc-fetch-apply-updates.timer would download whatever the tracked tag
+#   points to, stage it and reboot into it. No client-side signature check
+#   exists yet (/etc/containers/policy.json enforcement is Phase 1 work), so
+#   the timer is masked and "bootc upgrade" is a manual step until then.
+# The fwupd metadata refresh is left at the base default, pending a founder
+# decision; see the pipeline document.
+RUN set -eu; \
+    systemctl mask rpm-ostree-countme.timer rpm-ostree-countme.service; \
+    systemctl mask bootc-fetch-apply-updates.timer; \
+    if [ -d /etc/yum.repos.d ]; then \
+        find /etc/yum.repos.d -name '*.repo' -type f -exec sed -i 's/^countme=1/countme=0/' {} +; \
+    fi; \
+    install -d -m 0755 /usr/lib/NetworkManager/conf.d; \
+    printf '%s\n' \
+        '# AgentOS Tidemark: no connectivity probes (no telemetry).' \
+        '[connectivity]' \
+        'enabled=false' \
+        > /usr/lib/NetworkManager/conf.d/90-tidemark-no-connectivity-check.conf
+
+# Final check: bootc's own linter for bootable container images.
+RUN bootc container lint

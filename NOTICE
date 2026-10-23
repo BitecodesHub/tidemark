@@ -1,0 +1,13 @@
+AgentOS Tidemark
+Copyright 2026 The AgentOS Tidemark Authors
+
+Unless the file says otherwise, this project is licensed under Apache-2.0
+(see LICENSE).
+
+Licence exception, decided 2026-10-23 (docs/adr/2026-10-23_Phase0-Founder-
+Decisions_v1.md, FD-3): kernel-facing BPF C sources are dual-licensed
+GPL-2.0-only OR BSD-2-Clause, because the Linux kernel only lets
+GPL-compatible BPF objects call the BPF LSM kfuncs the labeller uses. These
+files carry the SPDX identifier "GPL-2.0-only OR BSD-2-Clause" and load with
+the licence tag "Dual BSD/GPL". As of 2026-10-23 that is spike/bpf/label_probe.bpf.c
+and the BPF sources under bpf/ that Phase 1 adds.
