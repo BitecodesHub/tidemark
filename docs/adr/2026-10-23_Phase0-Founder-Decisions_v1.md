@@ -281,7 +281,7 @@ value, and one of five named reasons for skipping - so "why did this not publish
 is answered by the log rather than by reading the workflow. Enabling publication
 is one command (`gh variable set PUBLISH_IMAGES --body push`) and is the
 founder's call, made when the repository goes public or when a consumer needs a
-pulled image. AC6 is therefore **deferred by one deliberate command**, not met.
+pulled image. AC6 is therefore **deferred by one deliberate command**, not met. The guard has since been observed working rather than assumed: run 39982982294 completed the whole graph - both builds, both boot tests green, including the Fedora 44 fallback's first CI boot - and `sign and publish` came out `skipped`, with the decision job reporting `BOOT=success`, `EVENT=push`, `REF=refs/heads/main`, `PUBLISH_IMAGES` unset.
 
 **PD-18, branch protection and secret scanning.** E4 asks for both, and neither
 is a code change, so the honest reading of "who owns this" is a decision rather

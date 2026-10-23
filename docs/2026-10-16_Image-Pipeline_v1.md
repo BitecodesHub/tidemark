@@ -1,6 +1,6 @@
 # AgentOS Tidemark Image Pipeline (v1, 2026-10-16)
 
-- **Status:** Phase 0 draft, revised on 2026-10-16 after review and on 2026-10-23 after the first green runs (section 6.6). Statements about CI behaviour are backed by observed runs where section 6.6 says so; the publish and signing steps are design intent and have deliberately never run (decision PD-17).
+- **Status:** Phase 0 draft, revised on 2026-10-16 after review and on 2026-10-23 after the first green runs (sections 6.6 and 6.7). Statements about CI behaviour are backed by observed runs where those sections say so; the publish and signing steps are design intent and have deliberately never run (decision PD-17, and the publish job's first observed outcome is `skipped`).
 - **Phase:** 0 (weeks 1 to 3, 19 October to 8 November 2026), checklist items E1 to E4, T1, T2, P1, P2 and acceptance criterion AC6.
 - **Owner:** Founder (reviews every change to the workflows and the self-test).
 - **Related records:** `docs/adr/2026-10-16_BaseImage_v1.md` (authoritative base-image decision), `docs/2026-10-16_Phase0-Checklist_v1.md`, `docs/research/2026-10-16_Tidemark-Concept_v1.md` (layer L0 and L8).
@@ -8,8 +8,8 @@
 ## Executive summary
 
 - The image is `quay.io/fedora/fedora-bootc:45`, pinned by digest, plus two Phase 0 units: a first-boot banner and a boot self-test. It contains **no Tidemark enforcement**: no labels, no gateway, no broker, no staging and no receipts. A Fedora 44 fallback is built the same way.
-- One run of `build-image.yml` carries each image from build to publication. It builds each x86_64 variant once, saves it as an OCI archive, scans that archive with no registry credentials, and boots that same archive twice through the reusable `boot-test.yml`. On `main`, and only after both builds and both boot tests pass **and the `PUBLISH_IMAGES` variable is set to `push`**, it pushes that same archive unchanged, signs it, verifies the signature and attaches a signed SBOM. The build, scan and boot halves ran green on 2026-10-23 (section 6.6); the publish half is switched off by decision (PD-17).
-- Both the Fedora 45 image (`:main`) and the Fedora 44 fallback (`:main-f44`) are pushed, signed and verified when publication is enabled, as checklist items E2 and T1 require; both build and the Fedora 45 one boots green today.
+- One run of `build-image.yml` carries each image from build to publication. It builds each x86_64 variant once, saves it as an OCI archive, scans that archive with no registry credentials, and boots that same archive twice through the reusable `boot-test.yml`. On `main`, and only after both builds and both boot tests pass **and the `PUBLISH_IMAGES` variable is set to `push`**, it pushes that same archive unchanged, signs it, verifies the signature and attaches a signed SBOM. The build, scan and boot halves ran green on 2026-10-23 on both variants (sections 6.6 and 6.7); the publish half is switched off by decision (PD-17) and was observed skipping itself, not being cancelled, in run 39982982294.
+- Both the Fedora 45 image (`:main`) and the Fedora 44 fallback (`:main-f44`) are pushed, signed and verified when publication is enabled, as checklist items E2 and T1 require; both build and both boot green today, the Fedora 44 fallback for the first time (section 6.7).
 - **Pinning:** actions are pinned by commit SHA and container images by digest; actionlint and the Python wheels are pinned by SHA-256. Not pinned: the Ubuntu packages (QEMU, OVMF, and podman on arm64), the trivy vulnerability database, and the lychee binary that lychee-action downloads.
 - The self-test requires BTF, the two kfunc names the labeller now uses (`bpf_get_file_xattr`, `bpf_path_d_path` - `bpf_real_data_inode` went out with decision PD-1) and a Linux 7.2 floor, which PD-2 confirmed as the v0.1 policy choice.
 - Still open: checklist items E3 and T2 need the kernel probe to run inside the booted image (section 6.2); that is D2, deferred to Phase 1 week 4 by PD-6, so both stay unchecked rather than being redefined.
@@ -33,8 +33,9 @@ It does not claim that the image protects anything. The self-test reports; it do
 | `image/bib/config.toml` | bootc-image-builder customizations: serial console kernel arguments only; no users or keys. |
 | `.github/workflows/build-image.yml` | Build, scan, boot test (through the reusable workflow), push, sign, verify, attest. |
 | `.github/workflows/boot-test.yml` | Reusable workflow: qcow2 build and a two-boot QEMU/KVM serial-console test of one archive. |
-| `.github/workflows/lint.yml` | actionlint, shellcheck, policy schema validation, offline Markdown link check. |
-| `.github/workflows/scorecard.yml` | OpenSSF Scorecard. |
+| `.github/workflows/lint.yml` | actionlint, shellcheck, `gofmt` + `go vet` + staticcheck over the spike module, policy schema validation, offline Markdown link check. |
+| `.github/workflows/scorecard.yml` | OpenSSF Scorecard, scheduled and non-gating while private (PD-15). |
+| `.github/workflows/dco.yml` | Checks the `Signed-off-by` trailer on every commit under review (PD-11). Not image-related; listed here because it is one of the six workflows that run on every push to `main`, and none of them is a required check while branch protection is off (PD-18). |
 | `renovate.json` | Digest and action updates (justification in its `description` field and in section 9). |
 
 The Go module path and the documentation URLs in the unit files were placeholders until 2026-10-23, when the repository was created as `github.com/BitecodesHub/tidemark` (Phase 0 decisions ADR PD-10); they now point there. The image name in CI is derived at run time as `ghcr.io/<owner>/tidemark` with the owner lowercased, so it needs no edit.
@@ -208,7 +209,42 @@ Run [39978024733](https://github.com/BitecodesHub/tidemark/actions/runs/39978024
 
 The build jobs produced `tidemark-image-fedora-45` (1,060,348,755 bytes) and `-fedora-44` (1,050,830,675) archives plus `tidemark-reports-*` SBOM and trivy bundles (2,647,605 and 2,693,706 bytes). The Fedora 45 boot test booted the built archive twice with no network and a serial console and got `TIDEMARK_SELFTEST v=1 result=PASS phase=0 failed=none` on both boots - `uptime_s=10.40` on the first, `9.09` on the second, kernel `7.2.11-300.fc45.x86_64`, `landlock_abi=10`, LSM list `lockdown,capability,yama,selinux,bpf,landlock,ipe,ima,evm`, `kfunc_bpf_get_file_xattr=ok`, `kfunc_bpf_path_d_path=ok`, `selinux=enforcing` - with `multi-user.target` about 11 seconds into the first boot's serial log. The logs are the artifact `tidemark-boot-test-serial-logs-fedora-45` (sha256 `25c0e902e4a10b5ef045c4a6ddd5f9e01e79ffb992ae7bc7905221a16ff0ff4d`).
 
-Why the run was cancelled rather than left to finish: at that moment the publish job had become reachable, and its first irreversible action is a keyless cosign signature, which writes a public Sigstore transparency-log entry naming this repository and both digests. Publication is now opt-in (PD-17), the publish job also requires an explicit successful boot-test result, and the `record the publish decision` job states in every image run which of the five conditions did or did not hold. The Fedora 44 boot test is the one piece of this table that has never been observed green; it is owed on the next image-path run.
+Why the run was cancelled rather than left to finish: at that moment the publish job had become reachable, and its first irreversible action is a keyless cosign signature, which writes a public Sigstore transparency-log entry naming this repository and both digests. Publication is now opt-in (PD-17), the publish job also requires an explicit successful boot-test result, and the `record the publish decision` job states in every image run which of the five conditions did or did not hold. The one row of that table that had never been green - the Fedora 44 boot test - went green 31 minutes later on the next image-path run, section 6.7.
+
+### 6.7 The first end-to-end run (2026-10-23, later: 39982982294)
+
+Run [39982982294](https://github.com/BitecodesHub/tidemark/actions/runs/39982982294), a push to `main` at commit `7b02d80`, reached `completed / success` with every image job present. Nothing is published, and that is the only difference from the design in section 6.1:
+
+| Job | Result | Wall time |
+|---|---|---|
+| `detect image changes` | success | 6 s (15:59:33→15:59:39) |
+| `build (x86_64, fedora-45)` | success | 6 m 25 s |
+| `build (x86_64, fedora-44)` | success | 6 m 46 s |
+| `build (aarch64, non-gating)` | success | 1 m 57 s |
+| `boot test (fedora-45)` | success | 7 m 43 s |
+| `boot test (fedora-44)` | **success, the first time** | 20 m 36 s |
+| `record the publish decision` | success | 5 s |
+| `sign and publish` | **skipped** | 0 s |
+
+Both variants booted twice with no network. Fedora 45 (`kernel=7.2.11-300.fc45.x86_64`): `result=PASS` at `uptime_s=9.62` and `8.73`. Fedora 44 (`kernel=7.2.11-200.fc44.x86_64`): `result=PASS` at `uptime_s=11.42` and `9.07`. Each line carries the same feature set - `landlock_abi=10`, LSM list `lockdown,capability,yama,selinux,bpf,landlock,ipe,ima,evm`, `overlayfs=ok`, `var_xattr=ok`, `xattr_security_bpf=ok`, `btf=ok`, `kfunc_bpf_get_file_xattr=ok`, `kfunc_bpf_path_d_path=ok`, `selinux=enforcing`, `var_fstype=xfs` - so P2 holds on the fallback image too, with the first Fedora 44 boot reaching the self-test 11.42 seconds after the guest clock started. Serial logs: `tidemark-boot-test-serial-logs-fedora-45` (51,059 bytes, sha256 `23c651c419f7e2fa8a630a887302c063f115b4cd702c3c44590e435bebc90b8e`) and `-fedora-44` (50,449 bytes, sha256 `b187a36bfa2f90bb7f675cda43fa280f26e310dbd9efd1400acba46c8167ac3b`).
+
+The `record the publish decision` job ran with `BOOT=success`, `EVENT=push`, `REF=refs/heads/main` and `PUBLISH_IMAGES` empty, all four visible in its log. Those values put its own condition chain on the PD-17 branch, the one that writes *not published: publication is opt-in*, names the irreversible Sigstore entry as the reason and prints the enabling command. `sign and publish` was therefore skipped rather than cancelled, which is the behaviour the design intends and the first time it was observed.
+
+**The measurement worth carrying forward: a boot test's wall time is runner I/O, not the image.** These two boot-test jobs are the same reusable workflow on the same commit with a gigabyte-sized archive each, and one took 7 m 43 s while the other took 20 m 36 s. Split by step, from the timestamps in each job log (fedora-45 first, fedora-44 second):
+
+| Step | fedora-45 | fedora-44 |
+|---|---|---|
+| delete unused runner software | 1 m 06 s | 1 m 25 s |
+| `apt-get update` and install `qemu-system-x86 qemu-utils ovmf` | **15 s** | **9 m 40 s** |
+| download the 1 GB image archive | 1 m 50 s | 4 m 08 s |
+| load the archive, check its image ID | 56 s | 62 s |
+| build the qcow2 with bootc-image-builder | 2 m 51 s | 3 m 29 s |
+| boot twice under QEMU, read the results | 36 s | 43 s |
+| upload the serial logs | 5 s | 5 s |
+
+Two runner-side steps account for 11 m 43 s of the 12 m 53 s gap. The work that is actually about the image - loading it, building a qcow2 from it, booting it twice - differed by 38 s, 7 s and 6 s, on a job whose own `timeout-minutes: 60` used 34% of its budget even on the slow runner. So no timeout is being raised on one observation, and the point stands: wall time here must never be read as an image property, and a future "the boot test got slower" report should look at the apt mirror and the artifact download before it looks at the guest.
+
+What is still not observed anywhere in this pipeline, after two runs: the push to GHCR, `cosign sign`, `cosign verify`, `cosign verify-attestation` and the SBOM attestation attachment - steps 1 to 7 of the publish job remain design intent until the founder enables publication (section 6.1, PD-17).
 
 ## 7. Verifying the published image
 
