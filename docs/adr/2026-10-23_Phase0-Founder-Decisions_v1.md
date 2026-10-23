@@ -332,7 +332,8 @@ narrow the directory-rule claim, and either outcome is a documented limitation
 rather than a silent hole. Kill criterion 1 still needs the x86_64 half.
 
 **Amended later the same day.** The x86_64 half has now run (PD-16): 16 of 16 in
-four consecutive CI runs on the same scripts, reported in
+four consecutive CI runs on the same scripts, and a fifth green run after them on
+unchanged test code, reported in
 `docs/spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md`, so the
 "either architecture" condition of criterion 1 is measured rather than assumed.
 The latency caveat also sharpened with the second architecture: the labeller
@@ -423,7 +424,7 @@ public transparency-log entry for a private repository.
 - [../spike-results/2026-10-23_Spike-Environment-aarch64_v2.txt](../spike-results/2026-10-23_Spike-Environment-aarch64_v2.txt) -
   kernel, toolchain and object digest for the runs.
 - [../spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md](../spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md) -
-  the four CI runs that closed the x86_64 half of criterion 1, and the latency
+  the five CI runs that closed the x86_64 half of criterion 1, and the latency
   comparison that amended the caveat above.
 - [../../.github/workflows/build-image.yml](../../.github/workflows/build-image.yml) -
   where PD-14's reachability check and PD-17's `PUBLISH_IMAGES` guard live.

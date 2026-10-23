@@ -352,7 +352,7 @@ coverage gaps (mmap, grandchild and overlay reads) before the fallback may be
 selected, per kill criterion 1.
 
 **Status 2026-10-23: both environments named above have run the 16-scenario
-suite - aarch64 in three consecutive Lima runs, x86_64 in four consecutive
+suite - aarch64 in three consecutive Lima runs, x86_64 in five consecutive
 GitHub Actions QEMU/KVM runs - and no gated assumption failed on either. The
 `TM_DISABLE_INODE_CACHE=1` no-cache run below is so far aarch64-only. Evidence:
 `docs/spike-results/2026-10-23_Kernel-Spike-Results-aarch64_v2.md` and
@@ -526,6 +526,7 @@ time.
 | 2026-10-17 | v0 draft (spike alignment) | Corrected the S2 test (nesting below the session does not change the level-2 ancestor; the move-out step now matches checklist AC3); added the coverage of Section 10.2 by the 11 spike scenarios, following `spike/README.md`. |
 | 2026-10-23 | v0 draft (decisions and 16-scenario spike) | Applied the Phase 0 founder decisions ADR: G3, Section 7, S1, S6 and Section 10.1 now state that the labeller keeps no inode-keyed cache (PD-1) and that the 7.2 floor is a policy choice rather than a `bpf_real_data_inode` dependency (PD-2); S2, S7 and the coverage paragraph record the scenarios that now test move-out, the 10,000-iteration race in both readings, and attribute removal; A4c's aliasing question is closed by PD-4 (location, with link/rename denied out of a ruled root); spike scenario count 12 to 16. |
 | 2026-10-23 | v0 draft (x86_64 spike) | Section 10 gains its status line: the x86_64 CI run passes 16 of 16 in four runs, so G3's kernel assumptions now hold on both architectures (the `TM_DISABLE_INODE_CACHE=1` run stays aarch64-only), and G3's cache-defect note is now a both-architecture measurement. |
+| 2026-10-23 | v0 draft (x86_64 repetition) | A fifth consecutive green x86_64 CI run closed the same day at commit `7b02d80`, where the only file differing under `spike/` is `spike/README.md` — the test code, the probe and the loader are unchanged. Section 10's status line now reads five runs. Nothing in the guarantee table changes: repetition strengthens G3's kernel assumptions, it does not add one. The run-to-run latency spread is recorded in the spike report, not here, because this document claims no numbers. |
 
 ---
 
