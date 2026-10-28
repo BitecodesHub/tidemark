@@ -38,7 +38,7 @@ are:
 | Primitive | Planned mechanism | Status |
 |---|---|---|
 | Session principal | One systemd transient unit per agent run: cgroup subtree, loopback-only network namespace, strict Landlock (ABI 9 or later), seccomp deny list, no namespace creation | Not started |
-| Kernel-recorded read-time labels | Sleepable BPF LSM programs on `file_open` and `file_receive` raise the session's label word before the labelled `open()` returns; a file's label is the union of its `security.bpf.*` xattr and every matching directory rule | Phase 0 kernel spike passed 16 of 16 scenarios on aarch64 (Fedora 45 Beta, kernel 7.2.0-61, three identical runs, 2026-10-23; 12 of 12 on 2026-10-18) and 16 of 16 on x86_64 (same kernel version, four identical GitHub Actions QEMU/KVM runs, 2026-10-23), including the 10,000-iteration raise-before-return race in both the opener and a separate observer reading and the overlayfs case on each architecture. Measured on an instrument that only observes: no production labeller exists |
+| Kernel-recorded read-time labels | Sleepable BPF LSM programs on `file_open` and `file_receive` raise the session's label word before the labelled `open()` returns; a file's label is the union of its `security.bpf.*` xattr and every matching directory rule | Phase 0 kernel spike passed 16 of 16 scenarios on aarch64 (Fedora 45 Beta, kernel 7.2.0-61, three identical runs, 2026-10-23; 12 of 12 on 2026-10-18) and 16 of 16 on x86_64 (same kernel version, five consecutive GitHub Actions QEMU/KVM runs, 2026-10-23), including the 10,000-iteration raise-before-return race in both the opener and a separate observer reading and the overlayfs case on each architecture. Measured on an instrument that only observes: no production labeller exists |
 | Clearance-gated exits | `tidemark-gw`: one Unix socket per session; the session's current label is re-checked against the destination's clearance before **every forwarded chunk**; tunnels are reset when the label rises; DNS, UDP and IP literals are refused | Not started |
 | Label-constrained model broker | `tidemark-broker`: OpenAI Chat Completions; a labelled session is placed only on backends cleared for its label (by default the local llama-server), otherwise it fails closed with a reason; the broker alone holds API keys | Not started |
 | Staged writes with label stamping | overlayfs staging; `commit` (run outside the session) stamps written files with the session's final label; auto-exec, hook and skill files wait for `accept`; agent memory is partitioned by label; `abort` restores the workspace byte for byte | Not started |
@@ -49,6 +49,22 @@ The preview guarantees G1 to G9 (containment, single exit, label before read, cl
 chunk, model channel, staged writes carry labels, evidence against the agent, stop, and
 declassification) are defined in the threat model. They are targets until the test matrices that
 check them pass in CI.
+
+## Measured overhead (Phase 0 spike, 2026-10-23)
+
+The spike instrument records `open(2)` latency around the label hook, 20,000 iterations per case
+after 2,000 warmup. These are floors measured on an observing instrument, not a production
+labeller, and they are the numbers any future optimiser has to beat:
+
+| Environment | `open()` outside a session (p50) | `open()` inside a session, unlabelled file (p50) | Labeller delta (p50) |
+|---|---|---|---|
+| aarch64, Lima VM (Fedora 45) | 835 ns | 1,211 ns | about **+376 ns** |
+| x86_64, CI guest under QEMU/KVM | 2,535 ns (median of four runs) | 4,098 ns | about **+1.56 µs** (the guest is CPU-oversubscribed) |
+
+The xattr-labelled steady state, the raise path and the directory-rule path are measured too, and
+the full five-run tables with p99 and mean are in
+[`docs/spike-results/`](docs/spike-results/), with the method in
+[`docs/BENCHMARK_METHODOLOGY.md`](docs/BENCHMARK_METHODOLOGY.md).
 
 ## Not claimed
 

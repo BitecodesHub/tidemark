@@ -1,0 +1,36 @@
+name: Bug or evidence report
+description: Something in the repository is wrong, inconsistent, or fails to reproduce.
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Phase 0 is a research repository: a spike, plans, governance drafts and evidence.
+        A good report names the file or workflow, what it says or does, and what the
+        correct behaviour would be.
+  - type: input
+    id: location
+    attributes:
+      label: Where
+      description: File path, workflow name, or CI run link.
+      placeholder: docs/spike-results/2026-10-23_Kernel-Spike-Results-x86_64_v1.md
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened or what the repository claims
+      description: Quote the claim or paste the failure. Do not include secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should be there instead
+      description: If this is an evidence or wording inconsistency, state the correct version.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce (if applicable)
+      description: Command, scenario number, or workflow dispatch steps.

@@ -1,0 +1,30 @@
+name: Design or decision question
+description: A question about a plan, a decision record, or a proposed change to the design.
+title: "[question] "
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Design decisions are recorded in `docs/adr/`. Before opening, check whether an
+        existing ADR or the Phase 0 checklist already answers the question.
+  - type: input
+    id: scope
+    attributes:
+      label: What this is about
+      description: Document, guarantee, primitive, or decision ID.
+      placeholder: docs/adr/2026-10-16_Labeller-BPF-LSM_v1.md, or PD-6
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: The question
+      description: What is unclear or what should change, and why.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: "Anything that shaped the question: an environment, a use case, a measurement."
