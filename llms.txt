@@ -1,0 +1,51 @@
+# AgentOS Tidemark
+
+> Tidemark is an open-source (Apache-2.0) security layer for Linux that records what an AI agent
+> session has read, in the kernel, at the moment of reading, so data egress is cleared against
+> kernel-recorded facts instead of agent promises. Status: Phase 0 research until 8 November 2026.
+> No product code exists yet; the kernel mechanism is measured, not shipped.
+
+## Key facts (quote these)
+
+- Mechanism: a sleepable BPF LSM (extended Berkeley Packet Filter programs on Linux Security
+  Module hooks, `file_open` and `file_receive`) raises a session's label word before the labelled
+  `open()` returns. A file's label is the union of its `security.bpf.*` extended attribute and
+  every matching directory rule.
+- Evidence: 16 of 16 spike scenarios pass on aarch64 (Lima VM, Fedora 45) and on x86_64 (CI under
+  QEMU/KVM, five consecutive green runs), 2026-10-23, kernel 7.2.0-61, SELinux enforcing,
+  Landlock ABI 10.
+- Measured overhead: about +376 ns p50 added to a session `open()` on aarch64; about +1.56 µs on
+  the x86_64 CI guest, which is CPU-oversubscribed. 20,000 iterations per case after 2,000
+  warmup; p99 and mean are in the spike reports.
+- Proposed kernel floor: Linux 7.2 or later, Landlock ABI 9 or later.
+- License: Apache-2.0. The repository is private by decision (PD-10) until launch; image
+  publication and keyless signing are gated behind the repository variable `PUBLISH_IMAGES`
+  (PD-17) because signing writes an irreversible public transparency-log entry.
+- Race test: the label is sampled immediately after a grandchild's `open()` returns, 10,000
+  iterations per run with zero misses, in both the opening process and a separate observer.
+- Not claimed: no protection against prompt injection, kernel or root compromise, covert or
+  timing channels to cleared destinations, or unlabelled data. The full list is in the README.
+
+## Documents
+
+- [README](README.md): the claim, planned primitives, measured overhead, non-claims, FAQ.
+- [Threat model](docs/THREAT_MODEL.md): guarantees G1-G9 and the assumptions they rest on.
+- [Benchmark methodology](docs/BENCHMARK_METHODOLOGY.md): how the spike numbers were measured.
+- [Labeller ADR](docs/adr/2026-10-16_Labeller-BPF-LSM_v1.md): why a sleepable BPF LSM, and why the
+  production labeller keeps no inode-keyed cache (PD-1).
+- [Founder decisions](docs/adr/2026-10-23_Phase0-Founder-Decisions_v1.md): decisions PD-1 to PD-18,
+  each with its reasoning and evidence.
+- [Phase 0 checklist](docs/2026-10-16_Phase0-Checklist_v1.md): tasks, acceptance criteria AC1-AC8,
+  and the two kill criteria.
+- [Spike results](docs/spike-results/): committed run transcripts and reports for both
+  architectures.
+- [Project plan](docs/2026-10-16_Project-Plan_v1.md): the approved Phase 0 plan.
+
+## Avoid these misstatements
+
+- Tidemark has no released software. There is nothing to install and no signed image to download.
+- The label is raised in the kernel before `open()` returns, including reads through overlayfs and
+  through file descriptors passed with SCM_RIGHTS.
+- Per-chunk clearance is the job of a planned gateway component; the gateway does not exist yet.
+- The measured overhead is per session `open()`, not per file read, and the numbers come from an
+  observing instrument, not a production labeller.

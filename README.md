@@ -14,6 +14,17 @@
 > currently private; the interview coding rules, spike evidence and decisions are all in it and are
 > published with the launch.
 
+## What Tidemark is, in one paragraph
+
+Tidemark is an open-source (Apache-2.0) security layer for Linux that records what an AI agent
+session has read, in the kernel, at the moment of reading. The mechanism is a sleepable BPF LSM —
+an extended Berkeley Packet Filter (eBPF) program attached to Linux Security Module (LSM) hooks —
+that raises a session's label word before the labelled `open()` call returns, so that outgoing
+data is cleared against kernel-recorded facts instead of agent promises. The Phase 0 spike has
+measured that mechanism end to end: 16 of 16 scenarios pass on aarch64 and x86_64, with about
++376 ns added to a session `open()` on aarch64. Every other component — gateway, model broker,
+staged writes, receipts — is designed but not built.
+
 ## The claim (target for the v0.1 preview)
 
 **What an agent session has read decides where its data may go next, including which model sees it,
@@ -124,20 +135,65 @@ grep on the host; receipts are a secondary check.
   Proposed; checklist decision FD-G). Landlock ABI 9 first ships in Linux 7.1
   (`landlock_abi_version = 9` in `security/landlock/syscalls.c` at the v7.1 tag), but
   `bpf_real_data_inode`, which keys the optional overlay-safe label cache, first appears at the
-  **v7.2** tag and is absent at v7.1. Support for 7.1 kernels is deferred; the labeller ADR
-  revisits the floor if checklist item C2 selects the no-cache design after the Phase 0 spike.
+  **v7.2** tag and is absent at v7.1. Checklist item C2 is since decided (PD-1): the production
+  labeller keeps **no inode-keyed cache**, so the cache keyed by that kfunc is not needed and
+  support for 7.1 kernels stays deferred to Phase 6 (PD-2).
 - BPF LSM active in the boot LSM list, with sleepable programs on `file_open` and `file_receive`
   (both are in the sleepable hook set in `kernel/bpf/bpf_lsm.c`).
-- The fs kfuncs `bpf_get_file_xattr`, `bpf_path_d_path` and `bpf_real_data_inode`
-  (`fs/bpf_fs_kfuncs.c`). Fedora 44 and 45 kernels were in the 7.2.x series when checked on
-  16 October 2026; the Phase 0 probe confirms what the pinned image actually ships.
+- The fs kfuncs `bpf_get_file_xattr` and `bpf_path_d_path` (`fs/bpf_fs_kfuncs.c`).
+  `bpf_real_data_inode` is no longer on the required list (PD-1: the no-cache design does not
+  need it; it was a spike-only experiment). Fedora 44 and 45 kernels were in the 7.2.x series
+  when checked on 16 October 2026; the Phase 0 probe confirms what the pinned image actually ships.
 - Development hosts: the aarch64 kernel spike is planned to run in a Lima VM on an Apple silicon
   Mac; free GitHub x86_64 KVM runners are the only gating environment. No nested virtualization is required.
 
+## FAQ
+
+**Is there something to install today?**
+No. Phase 0 ends on Sunday 8 November 2026 with a written go/no-go decision. The spike instrument
+builds and runs; the image pipeline builds and boots both Fedora variants in CI, and publishes
+nothing until publication is deliberately turned on (PD-17). There is no daemon, no installer and
+no signed image yet.
+
+**What does the label actually do?**
+Each session has a label word. When a session process reads a file, the BPF LSM raises the word
+before `open()` returns, using the file's `security.bpf.*` extended attribute plus any matching
+directory rules. The planned gateway re-checks the label against each destination's clearance
+before every forwarded chunk. Once a session reads labelled data it loses public egress for the
+rest of its life.
+
+**Why a BPF LSM instead of fanotify?**
+fanotify's permission events miss some child-process reads and mmap cases; fanotify remains the
+documented fallback (threat model section 6). The kernel mechanism is also why the label exists
+before `open()` returns — the race the spike exercises 10,000 times per run with zero misses, in
+both the opening process and a separate observer.
+
+**What is the measured overhead?**
+About +376 ns p50 on a session `open()` on aarch64, and about +1.56 µs on the x86_64 CI guest,
+which is CPU-oversubscribed. Full tables with p99 and mean are in `docs/spike-results/`; the
+method is in `docs/BENCHMARK_METHODOLOGY.md`.
+
+**What does Tidemark not protect against?**
+Prompt injection, kernel or root compromise, covert channels to cleared destinations, and
+everything else in the [Not claimed](#not-claimed) list above. It is a confidentiality control
+for agent sessions, not a sandbox for hostile code.
+
+**Which kernel do I need?**
+The proposed floor is Linux 7.2 or later with Landlock ABI 9 or later, verified on Fedora 45
+(kernel 7.2.0-61) in both test environments. See [Platform requirements](#platform-requirements-planned-verified-in-phase-0).
+
+**When will the repository be public?**
+The repository is private by decision (PD-10) and goes public at launch. All evidence, decisions
+and templates are already in it and are published with the launch.
+
+**Who is it for?**
+People who run AI coding agents against private data and want the data's destination decided by
+what was actually read, not by what the agent claims.
+
 ## Repository map
 
-Present today (16 October 2026; every file is a Phase 0 draft, and nothing here is built or tested
-yet):
+Present today (28 October 2026; every file is a Phase 0 draft, the kernel spike is built and
+tested on both architectures, and no product code exists yet):
 
 | Path | Contents |
 |---|---|
@@ -153,10 +209,11 @@ yet):
 | `docs/2026-10-16_Image-Pipeline_v1.md` | Image pipeline design: base pinning, self-test, CI workflows, verification |
 | `image/` | Containerfiles (Fedora 45 and the Fedora 44 fallback), first-boot and self-test units for the image pipeline test (no enforcement) |
 | `spike/` | Phase 0 kernel spike: BPF probe, Go loader, 16 scenario scripts and Lima template (passed 16 of 16 on aarch64 and on x86_64 in CI on 2026-10-23, 12 of 12 on 2026-10-18; results in `docs/spike-results/`) |
-| `.github/workflows/` | Image build, boot test, kernel spike, lint and Scorecard workflows (not yet run) |
+| `.github/workflows/` | Image build, boot test, kernel spike, lint and Scorecard workflows (all have run; the kernel spike passed 16 of 16 in five consecutive CI runs, the image pipeline built and booted both Fedora variants and skipped publishing by gate PD-17) |
 | `renovate.json` | Dependency update rules for pinned digests and actions |
 | `LICENSE`, `NOTICE` | Apache License 2.0 and project notice |
 | `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `GOVERNANCE.md`, `CODE_OF_CONDUCT.md`, `TRADEMARK.md` | Governance drafts |
+| `llms.txt` | Machine-readable summary for AI answer engines: key facts, document index, common misstatements |
 | `.gitignore`, `.editorconfig` | Ignore rules (including generated BPF objects and key material) and editor formatting rules |
 
 Planned layout (directories appear as work lands; see the concept for the full tree):
